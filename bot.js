@@ -1,7 +1,9 @@
 require('dotenv').config();
 process.env.FFMPEG_PATH = require('ffmpeg-static');
+const sodium = require('libsodium-wrappers');
+const path = require('path');
 const { Client, GatewayIntentBits, ChannelType, ActivityType } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior, StreamType } = require('@discordjs/voice');
 const axios = require('axios');
 /* -------- CONFIG -------- */
 const TEXT_CHANNEL_ID = "1105074703669919779";
@@ -26,13 +28,11 @@ const bots = TOKENS.map((token, index) => {
   });
   client.once('ready', () => {
     console.log(`Bot ready: ${client.user.tag}`);
-    // This makes the bot appear online with a status
     client.user.setPresence({
       activities: [{ name: 'prayer times', type: ActivityType.Watching }],
       status: 'online'
     });
   });
-  client.login(token);
   return client;
 });
 const mainBot = bots[0];
@@ -48,17 +48,21 @@ async function playAdhan(bot, channel) {
       selfMute: false
     });
 
-    // Log every state change to see where it gets stuck
     connection.on('stateChange', (oldState, newState) => {
       console.log(`Voice connection: ${oldState.status} -> ${newState.status}`);
+      if (newState.status === VoiceConnectionStatus.Signalling &&
+          oldState.status === VoiceConnectionStatus.Connecting) {
+        console.log('Connection looping — attempting rejoin...');
+        connection.rejoinAttempts = 0;
+        connection.rejoin();
+      }
     });
 
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
       console.log(`Connection ready in ${channel.name}`);
     } catch {
-      console.log(`Connection stuck, current state: ${connection.state.status}`);
-      console.log(`Attempting to play anyway after 7s...`);
+      console.log(`Connection never reached Ready. Final state: ${connection.state.status}`);
       await new Promise(r => setTimeout(r, 7000));
     }
 
@@ -66,22 +70,24 @@ async function playAdhan(bot, channel) {
       behaviors: { noSubscriber: NoSubscriberBehavior.Play }
     });
 
-    const resource = createAudioResource('./adhan.mp3');
+    const resource = createAudioResource(path.join(__dirname, 'adhan.mp3'), {
+      inputType: StreamType.Arbitrary
+    });
+
     connection.subscribe(player);
     player.play(resource);
     console.log(`Player state after play(): ${player.state.status}`);
 
+    player.on('stateChange', (o, n) => console.log(`Player: ${o.status} -> ${n.status}`));
+
     return new Promise((resolve, reject) => {
-      player.on('stateChange', (oldState, newState) => {
-        console.log(`Player: ${oldState.status} -> ${newState.status}`);
-      });
       player.on(AudioPlayerStatus.Idle, () => {
         console.log(`Adhan finished in ${channel.name}`);
         connection.destroy();
         resolve();
       });
       player.on('error', (err) => {
-        console.error(`Player error in ${channel.name}:`, err.message);
+        console.error(`Player error:`, err.message);
         connection.destroy();
         reject(err);
       });
@@ -176,23 +182,39 @@ mainBot.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.content.trim().toLowerCase() !== '!testadhan') return;
   console.log(`!testadhan triggered by ${message.author.tag}`);
-  // Fetch today's prayer data for the test message
-  let hijri = 'N/A', gregorian = 'N/A';
   try {
-    const data = await fetchPrayerTimes();
-    hijri = data.date.hijri.date;
-    gregorian = data.date.gregorian.date;
+    let hijri = 'N/A', gregorian = 'N/A';
+    try {
+      const data = await fetchPrayerTimes();
+      hijri = data.date.hijri.date;
+      gregorian = data.date.gregorian.date;
+    } catch (err) {
+      console.error('Could not fetch dates for test message:', err.message);
+    }
+    await message.reply('🔊 Running adhan test — sending message and joining active voice channels...');
+    await sendPrayerMessage('Test', hijri, gregorian);
+    await runAdhan();
+    await message.reply('✅ Test complete.');
   } catch (err) {
-    console.error('Could not fetch dates for test message:', err.message);
+    console.error('Test command error:', err.message);
+    try { await message.reply('❌ Test failed: ' + err.message); } catch {}
   }
-  await message.reply('🔊 Running adhan test — sending message and joining active voice channels...');
-  await sendPrayerMessage('Test', hijri, gregorian);
-  await runAdhan();
-  await message.reply('✅ Test complete.');
+});
+
+/* -------- GLOBAL ERROR HANDLERS (prevent crashes) -------- */
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err?.message ?? err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err?.message ?? err);
 });
 /* -------- START -------- */
-mainBot.once("ready", async () => {
-  console.log(`Main bot ready: ${mainBot.user.tag}`);
-  await schedulePrayerTimes();
-  scheduleMidnightRefresh();
+sodium.ready.then(() => {
+  console.log('Sodium ready, logging in bots...');
+  bots.forEach((bot, i) => bot.login(TOKENS[i]));
+  mainBot.once("ready", async () => {
+    console.log(`Main bot ready: ${mainBot.user.tag}`);
+    await schedulePrayerTimes();
+    scheduleMidnightRefresh();
+  });
 });
