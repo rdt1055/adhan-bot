@@ -3,7 +3,7 @@ process.env.FFMPEG_PATH = require('ffmpeg-static');
 const sodium = require('libsodium-wrappers');
 const path = require('path');
 const { Client, GatewayIntentBits, ChannelType, ActivityType } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior, StreamType } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior, StreamType } = require('discord-voip');
 const axios = require('axios');
 /* -------- CONFIG -------- */
 const TEXT_CHANNEL_ID = "1105074703669919779";
