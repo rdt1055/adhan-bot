@@ -85,7 +85,8 @@ const slashCommands = [
     description: 'إزالة قناة من قائمة التجاهل',
     options: [{ name: 'channel_id', description: 'ID القناة الصوتية', type: 3, required: true }]
   },
-  { name: 'settings', description: 'عرض إعدادات البوت في هذا السيرفر' }
+  { name: 'settings', description: 'عرض إعدادات البوت في هذا السيرفر' },
+  { name: 'times', description: 'عرض مواقيت الصلاة لليوم مع الوقت المتبقي لكل صلاة' }
 ];
 /* -------- CREATE BOTS -------- */
 const bots = TOKENS.map((token, index) => {
@@ -261,7 +262,8 @@ async function schedulePrayerTimes() {
   const prayers = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
   for (const prayer of prayers) {
     const [h, m] = timings[prayer].split(":");
-    
+
+    // Get current time in Algiers timezone (UTC+1)
     const nowUtc = new Date();
     const algiersOffset = 60; // UTC+1 in minutes
     const nowAlgiers = new Date(nowUtc.getTime() + algiersOffset * 60000);
@@ -360,6 +362,53 @@ async function handleCommand(commandName, options, reply, guildId, guild) {
     await reply(`✅ تمت إزالة القناة \`${channelId}\` من قائمة التجاهل.`);
     return;
   }
+  if (commandName === 'times') {
+    try {
+      const data = await fetchPrayerTimes();
+      const timings = data.timings;
+      const hijri = data.date.hijri.date;
+      const gregorian = data.date.gregorian.date;
+      const prayers = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
+
+      // Current time in Algiers (UTC+1)
+      const nowUtc = new Date();
+      const nowAlgiers = new Date(nowUtc.getTime() + 60 * 60000);
+
+      const lines = prayers.map(prayer => {
+        const [h, m] = timings[prayer].split(":");
+        const prayerTime = new Date(nowAlgiers);
+        prayerTime.setHours(Number(h), Number(m), 0, 0);
+
+        const diffMs = prayerTime - nowAlgiers;
+        const nameAr = PRAYER_NAMES_AR[prayer];
+        const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+
+        let status;
+        if (diffMs <= 0) {
+          status = '✅ انتهى';
+        } else {
+          const totalMins = Math.floor(diffMs / 60000);
+          const hrs = Math.floor(totalMins / 60);
+          const mins = totalMins % 60;
+          status = hrs > 0 ? `⏳ بعد ${hrs}س ${mins}د` : `⏳ بعد ${mins}د`;
+        }
+
+        return `${nameAr} — **${timeStr}** — ${status}`;
+      });
+
+      await reply(
+`🗓️ **مواقيت الصلاة — الجزائر العاصمة**
+📅 الهجري: ${formatHijriDate(hijri)}
+📆 الميلادي: ${gregorian}
+
+${lines.join('\n')}`
+      );
+    } catch (err) {
+      await reply('❌ تعذّر جلب مواقيت الصلاة: ' + err.message);
+    }
+    return;
+  }
+
   if (commandName === 'settings') {
     const config = getServerConfig(guildId);
     const textCh = config.textChannelId ? `<#${config.textChannelId}>` : `الافتراضي (\`${TEXT_CHANNEL_ID}\`)`;
@@ -398,6 +447,7 @@ mainBot.on('messageCreate', async (message) => {
   if (lower === '!testadhan') commandName = 'testadhan';
   else if (lower === '!stopadhan') commandName = 'stopadhan';
   else if (lower === '!settings') commandName = 'settings';
+  else if (lower === '!times') commandName = 'times';
   else if (lower.startsWith('!setchannel')) {
     commandName = 'setchannel';
     options.channel_id = args[1];
