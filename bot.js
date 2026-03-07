@@ -261,15 +261,23 @@ async function schedulePrayerTimes() {
   const prayers = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
   for (const prayer of prayers) {
     const [h, m] = timings[prayer].split(":");
-    const now = new Date();
-    const prayerTime = new Date();
-    prayerTime.setHours(Number(h));
-    prayerTime.setMinutes(Number(m));
-    prayerTime.setSeconds(0);
-    prayerTime.setMilliseconds(0);
-    const delay = prayerTime - now;
+    
+    const nowUtc = new Date();
+    const algiersOffset = 60; // UTC+1 in minutes
+    const nowAlgiers = new Date(nowUtc.getTime() + algiersOffset * 60000);
+
+    // Build prayer time in UTC by subtracting the offset back
+    const prayerTimeAlgiers = new Date(nowAlgiers);
+    prayerTimeAlgiers.setHours(Number(h));
+    prayerTimeAlgiers.setMinutes(Number(m));
+    prayerTimeAlgiers.setSeconds(0);
+    prayerTimeAlgiers.setMilliseconds(0);
+
+    const prayerTimeUtc = new Date(prayerTimeAlgiers.getTime() - algiersOffset * 60000);
+    const delay = prayerTimeUtc - nowUtc;
+
     if (delay > 0) {
-      console.log(`${prayer} scheduled at ${h}:${m} (in ${Math.round(delay / 60000)} min)`);
+      console.log(`${prayer} scheduled at ${h}:${m} Algiers time (in ${Math.round(delay / 60000)} min)`);
       setTimeout(async () => {
         for (const guild of mainBot.guilds.cache.values()) {
           await sendPrayerMessage(prayer, hijri, gregorian, guild.id);
