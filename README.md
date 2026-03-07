@@ -30,6 +30,7 @@ All commands work as both slash commands (`/`) and prefix commands (`!`).
 | `/unignorechannel <channel_id>` | Removes a voice channel from the ignore list |
 | `/settings` | Shows the current configuration for this server |
 | `/times` | Shows the current hijri and gregorian date along with a list of prayer times for the day |
+| `/refresh` | Runs the refreshatmidnight function on command without waiting for the next day |
 
 ---
 
