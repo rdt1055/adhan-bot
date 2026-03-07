@@ -46,6 +46,15 @@ const PRAYER_NAMES_AR = {
   'Isha': 'العِشَاء',
   'Test': 'اختبار'
 };
+/* -------- PRAYER AUDIO FILES -------- */
+const PRAYER_AUDIO = {
+  'Fajr':    'fajr.mp3',
+  'Dhuhr':   'duhr.mp3',
+  'Asr':     'asr.mp3',
+  'Maghrib': 'maghrib.mp3',
+  'Isha':    'ishaa.mp3',
+  'Test':    'fajr.mp3'
+};
 /* -------- CONFIG -------- */
 const TEXT_CHANNEL_ID = "1105074703669919779";
 const IGNORED_CHANNELS = ["JOIN_HERE_CHANNEL_ID"];
@@ -110,7 +119,7 @@ async function registerSlashCommands() {
   }
 }
 /* -------- PLAY ADHAN -------- */
-async function playAdhan(bot, channel) {
+async function playAdhan(bot, channel, audioFile) {
   console.log(`${bot.user?.tag} joining ${channel.name}`);
   try {
     const connection = joinVoiceChannel({
@@ -143,7 +152,7 @@ async function playAdhan(bot, channel) {
     const player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Play }
     });
-    const resource = createAudioResource(path.join(__dirname, 'adhan.mp3'), {
+    const resource = createAudioResource(path.join(__dirname, audioFile), {
       inputType: StreamType.Arbitrary
     });
     // Track this player and connection for stop command
@@ -197,9 +206,11 @@ function getActiveVoiceChannels(guild) {
   );
 }
 /* -------- PLAY IN ALL ROOMS -------- */
-async function runAdhan(guildId = null) {
+async function runAdhan(guildId = null, prayer = 'Test') {
   adhanRunning = true;
   activePlayers.clear();
+  const audioFile = PRAYER_AUDIO[prayer] ?? PRAYER_AUDIO['Test'];
+  console.log(`Playing audio: ${audioFile}`);
   const guilds = guildId
     ? [mainBot.guilds.cache.get(guildId)].filter(Boolean)
     : [...mainBot.guilds.cache.values()];
@@ -208,7 +219,7 @@ async function runAdhan(guildId = null) {
     for (let i = 0; i < channels.length; i++) {
       const bot = bots[i % bots.length];
       const channel = channels[i];
-      await playAdhan(bot, channel);
+      await playAdhan(bot, channel, audioFile);
     }
   }
   adhanRunning = false;
@@ -263,7 +274,7 @@ async function schedulePrayerTimes() {
         for (const guild of mainBot.guilds.cache.values()) {
           await sendPrayerMessage(prayer, hijri, gregorian, guild.id);
         }
-        await runAdhan();
+        await runAdhan(null, prayer);
       }, delay);
     } else {
       console.log(`${prayer} already passed, skipping.`);
@@ -294,7 +305,7 @@ async function handleCommand(commandName, options, reply, guildId, guild) {
       } catch {}
       await reply('🔊 جارٍ تشغيل الاختبار — إرسال الرسالة والانضمام إلى قنوات الصوت...');
       await sendPrayerMessage('Test', hijri, gregorian, guildId);
-      await runAdhan(guildId);
+      await runAdhan(guildId, 'Test');
       await reply('✅ اكتمل الاختبار.');
     } catch (err) {
       await reply('❌ فشل الاختبار: ' + err.message);
