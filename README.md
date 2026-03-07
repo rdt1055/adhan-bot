@@ -29,6 +29,7 @@ All commands work as both slash commands (`/`) and prefix commands (`!`).
 | `/ignorechannel <channel_id>` | Adds a voice channel to the ignore list — the bot will never join it |
 | `/unignorechannel <channel_id>` | Removes a voice channel from the ignore list |
 | `/settings` | Shows the current configuration for this server |
+| `/times` | Shows the current hijri and gregorian date along with a list of prayer times for the day |
 
 ---
 
