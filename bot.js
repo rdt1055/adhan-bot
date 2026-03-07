@@ -3,8 +3,8 @@ process.env.FFMPEG_PATH = require('ffmpeg-static');
 const sodium = require('libsodium-wrappers');
 const path = require('path');
 const fs = require('fs');
-const { Client, GatewayIntentBits, ChannelType, ActivityType } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior, StreamType } = require('discord-voip');
+const { Client, GatewayIntentBits, ChannelType, ActivityType, REST, Routes } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior, StreamType, getVoiceConnection } = require('discord-voip');
 const axios = require('axios');
 /* -------- SERVER CONFIG -------- */
 const CONFIG_FILE = path.join(__dirname, 'serverconfig.json');
@@ -48,13 +48,35 @@ const PRAYER_NAMES_AR = {
 };
 /* -------- CONFIG -------- */
 const TEXT_CHANNEL_ID = "1105074703669919779";
-const IGNORED_CHANNELS = [
-  "JOIN_HERE_CHANNEL_ID"
-];
+const IGNORED_CHANNELS = ["JOIN_HERE_CHANNEL_ID"];
 const TOKENS = [
   process.env.TOKEN_1,
   process.env.TOKEN_2,
   process.env.TOKEN_3
+];
+/* -------- ACTIVE PLAYERS TRACKER (for stop command) -------- */
+const activePlayers = new Map(); // guildId -> { player, connections[] }
+let adhanRunning = false;
+/* -------- SLASH COMMANDS DEFINITION -------- */
+const slashCommands = [
+  { name: 'testadhan', description: 'تشغيل اختبار للأذان في القنوات الصوتية النشطة' },
+  { name: 'stopadhan', description: 'إيقاف الأذان الجاري وإخراج البوت من القناة الصوتية' },
+  {
+    name: 'setchannel',
+    description: 'تعيين قناة إشعارات الصلاة',
+    options: [{ name: 'channel_id', description: 'ID القناة النصية', type: 3, required: true }]
+  },
+  {
+    name: 'ignorechannel',
+    description: 'تجاهل قناة صوتية — لن يدخلها البوت',
+    options: [{ name: 'channel_id', description: 'ID القناة الصوتية', type: 3, required: true }]
+  },
+  {
+    name: 'unignorechannel',
+    description: 'إزالة قناة من قائمة التجاهل',
+    options: [{ name: 'channel_id', description: 'ID القناة الصوتية', type: 3, required: true }]
+  },
+  { name: 'settings', description: 'عرض إعدادات البوت في هذا السيرفر' }
 ];
 /* -------- CREATE BOTS -------- */
 const bots = TOKENS.map((token, index) => {
@@ -76,6 +98,17 @@ const bots = TOKENS.map((token, index) => {
   return client;
 });
 const mainBot = bots[0];
+/* -------- REGISTER SLASH COMMANDS -------- */
+async function registerSlashCommands() {
+  const rest = new REST({ version: '10' }).setToken(TOKENS[0]);
+  try {
+    console.log('Registering slash commands...');
+    await rest.put(Routes.applicationCommands(mainBot.user.id), { body: slashCommands });
+    console.log('Slash commands registered.');
+  } catch (err) {
+    console.error('Failed to register slash commands:', err.message);
+  }
+}
 /* -------- PLAY ADHAN -------- */
 async function playAdhan(bot, channel) {
   console.log(`${bot.user?.tag} joining ${channel.name}`);
@@ -103,12 +136,22 @@ async function playAdhan(bot, channel) {
       console.log(`Connection never reached Ready. Final state: ${connection.state.status}`);
       await new Promise(r => setTimeout(r, 7000));
     }
+    if (!adhanRunning) {
+      connection.destroy();
+      return;
+    }
     const player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Play }
     });
     const resource = createAudioResource(path.join(__dirname, 'adhan.mp3'), {
       inputType: StreamType.Arbitrary
     });
+    // Track this player and connection for stop command
+    if (!activePlayers.has(channel.guild.id)) {
+      activePlayers.set(channel.guild.id, { players: [], connections: [] });
+    }
+    activePlayers.get(channel.guild.id).players.push(player);
+    activePlayers.get(channel.guild.id).connections.push(connection);
     connection.subscribe(player);
     player.play(resource);
     console.log(`Player state after play(): ${player.state.status}`);
@@ -129,6 +172,19 @@ async function playAdhan(bot, channel) {
     console.error(`Failed to join ${channel.name}:`, err.message);
   }
 }
+/* -------- STOP ADHAN -------- */
+function stopAdhan() {
+  adhanRunning = false;
+  for (const [guildId, { players, connections }] of activePlayers.entries()) {
+    for (const player of players) {
+      try { player.stop(true); } catch {}
+    }
+    for (const connection of connections) {
+      try { connection.destroy(); } catch {}
+    }
+  }
+  activePlayers.clear();
+}
 /* -------- FIND ACTIVE VOICE CHANNELS -------- */
 function getActiveVoiceChannels(guild) {
   const { ignoredChannels } = getServerConfig(guild.id);
@@ -142,6 +198,8 @@ function getActiveVoiceChannels(guild) {
 }
 /* -------- PLAY IN ALL ROOMS -------- */
 async function runAdhan(guildId = null) {
+  adhanRunning = true;
+  activePlayers.clear();
   const guilds = guildId
     ? [mainBot.guilds.cache.get(guildId)].filter(Boolean)
     : [...mainBot.guilds.cache.values()];
@@ -153,6 +211,8 @@ async function runAdhan(guildId = null) {
       await playAdhan(bot, channel);
     }
   }
+  adhanRunning = false;
+  activePlayers.clear();
 }
 /* -------- SEND CHAT MESSAGE -------- */
 async function sendPrayerMessage(prayer, hijri, gregorian, guildId = null) {
@@ -222,94 +282,126 @@ function scheduleMidnightRefresh() {
     scheduleMidnightRefresh();
   }, delay);
 }
-/* -------- COMMANDS -------- */
-mainBot.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
-  const content = message.content.trim();
-  const lower = content.toLowerCase();
-  // !testadhan
-  if (lower === '!testadhan') {
-    console.log(`!testadhan triggered by ${message.author.tag}`);
+/* -------- SHARED COMMAND HANDLER -------- */
+async function handleCommand(commandName, options, reply, guildId, guild) {
+  if (commandName === 'testadhan') {
     try {
       let hijri = 'N/A', gregorian = 'N/A';
       try {
         const data = await fetchPrayerTimes();
         hijri = data.date.hijri.date;
         gregorian = data.date.gregorian.date;
-      } catch (err) {
-        console.error('Could not fetch dates for test message:', err.message);
-      }
-      await message.reply('🔊 جارٍ تشغيل الاختبار — إرسال الرسالة والانضمام إلى قنوات الصوت...');
-      await sendPrayerMessage('Test', hijri, gregorian, message.guild.id);
-      await runAdhan(message.guild.id);
-      await message.reply('✅ اكتمل الاختبار.');
+      } catch {}
+      await reply('🔊 جارٍ تشغيل الاختبار — إرسال الرسالة والانضمام إلى قنوات الصوت...');
+      await sendPrayerMessage('Test', hijri, gregorian, guildId);
+      await runAdhan(guildId);
+      await reply('✅ اكتمل الاختبار.');
     } catch (err) {
-      console.error('Test command error:', err.message);
-      try { await message.reply('❌ فشل الاختبار: ' + err.message); } catch {}
+      await reply('❌ فشل الاختبار: ' + err.message);
     }
     return;
   }
-  // !setchannel <channel_id>
-  if (lower.startsWith('!setchannel')) {
-    const channelId = content.split(/\s+/)[1];
-    if (!channelId) {
-      await message.reply('❌ الاستخدام: `!setchannel <channel_id>`');
-      return;
-    }
-    const target = message.guild.channels.cache.get(channelId);
+  if (commandName === 'stopadhan') {
+    stopAdhan();
+    await reply('🛑 تم إيقاف الأذان وإخراج البوت من القنوات الصوتية.');
+    return;
+  }
+  if (commandName === 'setchannel') {
+    const channelId = options.channel_id;
+    const target = guild.channels.cache.get(channelId);
     if (!target) {
-      await message.reply('❌ لم يتم العثور على القناة. تأكد من صحة الـ ID.');
+      await reply('❌ لم يتم العثور على القناة. تأكد من صحة الـ ID.');
       return;
     }
-    setServerConfig(message.guild.id, { textChannelId: channelId });
-    await message.reply(`✅ سيتم إرسال إشعارات الصلاة إلى <#${channelId}> الآن.`);
+    setServerConfig(guildId, { textChannelId: channelId });
+    await reply(`✅ سيتم إرسال إشعارات الصلاة إلى <#${channelId}> الآن.`);
     return;
   }
-  // !ignorechannel <channel_id>
-  if (lower.startsWith('!ignorechannel')) {
-    const channelId = content.split(/\s+/)[1];
-    if (!channelId) {
-      await message.reply('❌ الاستخدام: `!ignorechannel <channel_id>`');
-      return;
-    }
-    const config = getServerConfig(message.guild.id);
+  if (commandName === 'ignorechannel') {
+    const channelId = options.channel_id;
+    const config = getServerConfig(guildId);
     if (config.ignoredChannels.includes(channelId)) {
-      await message.reply('⚠️ هذه القناة مُتجاهَلة بالفعل.');
+      await reply('⚠️ هذه القناة مُتجاهَلة بالفعل.');
       return;
     }
     config.ignoredChannels.push(channelId);
-    setServerConfig(message.guild.id, { ignoredChannels: config.ignoredChannels });
-    await message.reply(`✅ لن يدخل البوت إلى القناة \`${channelId}\` بعد الآن.`);
+    setServerConfig(guildId, { ignoredChannels: config.ignoredChannels });
+    await reply(`✅ لن يدخل البوت إلى القناة \`${channelId}\` بعد الآن.`);
     return;
   }
-  // !unignorechannel <channel_id>
-  if (lower.startsWith('!unignorechannel')) {
-    const channelId = content.split(/\s+/)[1];
-    if (!channelId) {
-      await message.reply('❌ الاستخدام: `!unignorechannel <channel_id>`');
-      return;
-    }
-    const config = getServerConfig(message.guild.id);
+  if (commandName === 'unignorechannel') {
+    const channelId = options.channel_id;
+    const config = getServerConfig(guildId);
     const updated = config.ignoredChannels.filter(id => id !== channelId);
     if (updated.length === config.ignoredChannels.length) {
-      await message.reply('⚠️ هذه القناة ليست في قائمة التجاهل.');
+      await reply('⚠️ هذه القناة ليست في قائمة التجاهل.');
       return;
     }
-    setServerConfig(message.guild.id, { ignoredChannels: updated });
-    await message.reply(`✅ تمت إزالة القناة \`${channelId}\` من قائمة التجاهل.`);
+    setServerConfig(guildId, { ignoredChannels: updated });
+    await reply(`✅ تمت إزالة القناة \`${channelId}\` من قائمة التجاهل.`);
     return;
   }
-  // !settings
-  if (lower === '!settings') {
-    const config = getServerConfig(message.guild.id);
+  if (commandName === 'settings') {
+    const config = getServerConfig(guildId);
     const textCh = config.textChannelId ? `<#${config.textChannelId}>` : `الافتراضي (\`${TEXT_CHANNEL_ID}\`)`;
     const ignored = config.ignoredChannels.length > 0
       ? config.ignoredChannels.map(id => `\`${id}\``).join(', ')
       : 'لا يوجد';
-    await message.reply(`⚙️ **إعدادات هذا السيرفر:**\n📢 قناة الإشعارات: ${textCh}\n🔇 القنوات المتجاهلة: ${ignored}`);
+    await reply(`⚙️ **إعدادات هذا السيرفر:**\n📢 قناة الإشعارات: ${textCh}\n🔇 القنوات المتجاهلة: ${ignored}`);
     return;
   }
+}
+/* -------- SLASH COMMAND HANDLER -------- */
+mainBot.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  const options = {};
+  for (const opt of interaction.options.data) {
+    options[opt.name] = opt.value;
+  }
+  await interaction.deferReply();
+  await handleCommand(
+    interaction.commandName,
+    options,
+    (msg) => interaction.editReply(msg),
+    interaction.guild.id,
+    interaction.guild
+  );
+});
+/* -------- PREFIX COMMAND HANDLER (! commands still work) -------- */
+mainBot.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!message.guild) return;
+  const content = message.content.trim();
+  const lower = content.toLowerCase();
+  const args = content.split(/\s+/);
+  let commandName = null;
+  const options = {};
+  if (lower === '!testadhan') commandName = 'testadhan';
+  else if (lower === '!stopadhan') commandName = 'stopadhan';
+  else if (lower === '!settings') commandName = 'settings';
+  else if (lower.startsWith('!setchannel')) {
+    commandName = 'setchannel';
+    options.channel_id = args[1];
+    if (!options.channel_id) { await message.reply('❌ الاستخدام: `!setchannel <channel_id>`'); return; }
+  }
+  else if (lower.startsWith('!ignorechannel')) {
+    commandName = 'ignorechannel';
+    options.channel_id = args[1];
+    if (!options.channel_id) { await message.reply('❌ الاستخدام: `!ignorechannel <channel_id>`'); return; }
+  }
+  else if (lower.startsWith('!unignorechannel')) {
+    commandName = 'unignorechannel';
+    options.channel_id = args[1];
+    if (!options.channel_id) { await message.reply('❌ الاستخدام: `!unignorechannel <channel_id>`'); return; }
+  }
+  if (!commandName) return;
+  await handleCommand(
+    commandName,
+    options,
+    (msg) => message.reply(msg),
+    message.guild.id,
+    message.guild
+  );
 });
 /* -------- GLOBAL ERROR HANDLERS -------- */
 process.on('unhandledRejection', (err) => {
@@ -324,6 +416,7 @@ sodium.ready.then(() => {
   bots.forEach((bot, i) => bot.login(TOKENS[i]));
   mainBot.once("ready", async () => {
     console.log(`Main bot ready: ${mainBot.user.tag}`);
+    await registerSlashCommands();
     await schedulePrayerTimes();
     scheduleMidnightRefresh();
   });
