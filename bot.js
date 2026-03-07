@@ -86,7 +86,8 @@ const slashCommands = [
     options: [{ name: 'channel_id', description: 'ID القناة الصوتية', type: 3, required: true }]
   },
   { name: 'settings', description: 'عرض إعدادات البوت في هذا السيرفر' },
-  { name: 'times', description: 'عرض مواقيت الصلاة لليوم مع الوقت المتبقي لكل صلاة' }
+  { name: 'times', description: 'عرض مواقيت الصلاة لليوم مع الوقت المتبقي لكل صلاة' },
+  { name: 'refresh', description: 'إعادة جلب مواقيت الصلاة وتحديث الجدول فوراً' }
 ];
 /* -------- CREATE BOTS -------- */
 const bots = TOKENS.map((token, index) => {
@@ -163,12 +164,14 @@ async function playAdhan(bot, channel, audioFile) {
     activePlayers.get(channel.guild.id).players.push(player);
     activePlayers.get(channel.guild.id).connections.push(connection);
     connection.subscribe(player);
+    await new Promise(r => setTimeout(r, 1000)); // wait 1s before playing
     player.play(resource);
     console.log(`Player state after play(): ${player.state.status}`);
     player.on('stateChange', (o, n) => console.log(`Player: ${o.status} -> ${n.status}`));
     return new Promise((resolve, reject) => {
-      player.on(AudioPlayerStatus.Idle, () => {
+      player.on(AudioPlayerStatus.Idle, async () => {
         console.log(`Adhan finished in ${channel.name}`);
+        await new Promise(r => setTimeout(r, 5000)); // wait 5s before leaving
         connection.destroy();
         resolve();
       });
@@ -249,7 +252,7 @@ async function sendPrayerMessage(prayer, hijri, gregorian, guildId = null) {
 /* -------- FETCH PRAYER TIMES -------- */
 async function fetchPrayerTimes() {
   const res = await axios.get(
-    "https://api.aladhan.com/v1/timingsByCity?city=Algiers&country=Algeria&method=3"
+    "https://api.aladhan.com/v1/timings?latitude=36.7538&longitude=3.0588&method=19"
   );
   return res.data.data;
 }
@@ -362,6 +365,17 @@ async function handleCommand(commandName, options, reply, guildId, guild) {
     await reply(`✅ تمت إزالة القناة \`${channelId}\` من قائمة التجاهل.`);
     return;
   }
+  if (commandName === 'refresh') {
+    try {
+      await reply('🔄 جارٍ إعادة جلب مواقيت الصلاة...');
+      await schedulePrayerTimes();
+      await reply('✅ تم تحديث مواقيت الصلاة بنجاح.');
+    } catch (err) {
+      await reply('❌ فشل التحديث: ' + err.message);
+    }
+    return;
+  }
+
   if (commandName === 'times') {
     try {
       const data = await fetchPrayerTimes();
@@ -448,6 +462,7 @@ mainBot.on('messageCreate', async (message) => {
   else if (lower === '!stopadhan') commandName = 'stopadhan';
   else if (lower === '!settings') commandName = 'settings';
   else if (lower === '!times') commandName = 'times';
+  else if (lower === '!refresh') commandName = 'refresh';
   else if (lower.startsWith('!setchannel')) {
     commandName = 'setchannel';
     options.channel_id = args[1];
