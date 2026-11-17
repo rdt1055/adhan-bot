@@ -3,9 +3,10 @@ process.env.FFMPEG_PATH = require('ffmpeg-static');
 const sodium = require('libsodium-wrappers');
 const path = require('path');
 const fs = require('fs');
-const { Client, GatewayIntentBits, ChannelType, ActivityType, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, ActivityType, REST, Routes, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior, StreamType } = require('discord-voip');
 const axios = require('axios');
+const { buildAdhanEmbed, buildTimesEmbed, buildTimesComponents, TIMES_REFRESH_ID } = require('./embeds');
 /* -------- SERVER CONFIG -------- */
 const CONFIG_FILE = path.join(__dirname, 'serverconfig.json');
 function loadConfigs() {
@@ -545,6 +546,20 @@ async function sendPrayerMessage(prayer, hijri, gregorian, guildId = null) {
     }
     const channel = await mainBot.channels.fetch(channelId);
     const prayerAr = PRAYER_NAMES_AR[prayer] ?? prayer;
+
+    // Styled embed when the bot may embed links in that channel; plain text otherwise
+    const me = channel.guild?.members?.me;
+    const canEmbed = me ? (channel.permissionsFor(me)?.has(PermissionFlagsBits.EmbedLinks) ?? true) : true;
+    if (canEmbed) {
+      const t = getAlgiersParts();
+      const timeText = `${String(t.hour).padStart(2, '0')}:${String(t.minute).padStart(2, '0')}`;
+      const hijriText = /^\d+-\d+-\d+$/.test(hijri) ? formatHijriDate(hijri) : 'غير متاح';
+      await channel.send({
+        embeds: [buildAdhanEmbed({ prayer, prayerAr, timeText, hijriText, gregorian })]
+      });
+      return;
+    }
+
     await channel.send(
 `🕌 **حان وقت صلاة ${prayerAr} — الجزائر العاصمة**
 📅 الهجري: ${formatHijriDate(hijri)}
@@ -676,6 +691,64 @@ function retryInitialSchedule() {
     }
   }, 5 * 60 * 1000);
 }
+/* -------- /TIMES CARD (shared by the command and the refresh button) -------- */
+async function buildTimesPayload() {
+  const data = await fetchPrayerTimes();
+  const timings = data.timings;
+  const hijri = data.date.hijri.date;
+  const gregorian = data.date.gregorian.date;
+
+  const now = Date.now();
+  const algiers = getAlgiersParts(new Date(now));
+
+  const prayerList = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"].map(prayer => {
+    const { hour, minute } = parseAlgiersTime(timings[prayer]);
+    return {
+      key: prayer,
+      nameAr: PRAYER_NAMES_AR[prayer],
+      timeText: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+      targetUtc: algiersWallToUtc(algiers.year, algiers.month, algiers.day, hour, minute, 0, 0)
+    };
+  });
+
+  return {
+    embeds: [buildTimesEmbed({
+      hijriText: formatHijriDate(hijri),
+      gregorian,
+      prayers: prayerList,
+      nowMs: now
+    })],
+    components: [buildTimesComponents()]
+  };
+}
+
+/* Refresh button: rebuilds the card in place. One edit per click; clicks on the
+   same card closer than REFRESH_COOLDOWN_MS are acknowledged but ignored. */
+const REFRESH_COOLDOWN_MS = 3000;
+const lastRefreshByMessage = new Map(); // message id -> timestamp of last rebuild
+
+async function handleTimesRefresh(interaction) {
+  try {
+    await interaction.deferUpdate();
+
+    const messageId = interaction.message.id;
+    const last = lastRefreshByMessage.get(messageId) ?? 0;
+    if (Date.now() - last < REFRESH_COOLDOWN_MS) return;
+
+    if (lastRefreshByMessage.size > 200) lastRefreshByMessage.clear();
+    lastRefreshByMessage.set(messageId, Date.now());
+
+    await interaction.editReply(await buildTimesPayload());
+  } catch (err) {
+    logTimestamp(`Times refresh failed: ${err.message}`);
+    try {
+      await interaction.followUp({
+        content: '❌ تعذّر تحديث المواقيت. حاول مرة أخرى.',
+        flags: MessageFlags.Ephemeral
+      });
+    } catch {}
+  }
+}
 /* -------- SHARED COMMAND HANDLER -------- */
 async function handleCommand(commandName, options, reply, guildId, guild) {
   if (commandName === 'testadhan') {
@@ -748,50 +821,7 @@ async function handleCommand(commandName, options, reply, guildId, guild) {
 
   if (commandName === 'times') {
     try {
-      const data = await fetchPrayerTimes();
-      const timings = data.timings;
-      const hijri = data.date.hijri.date;
-      const gregorian = data.date.gregorian.date;
-      const prayers = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
-
-      const now = Date.now();
-      const algiers = getAlgiersParts(new Date(now));
-
-      const lines = prayers.map(prayer => {
-        const { hour, minute } = parseAlgiersTime(timings[prayer]);
-        const targetUtc = algiersWallToUtc(
-          algiers.year,
-          algiers.month,
-          algiers.day,
-          hour,
-          minute,
-          0,
-          0
-        );
-        const diffMs = targetUtc - now;
-        const nameAr = PRAYER_NAMES_AR[prayer];
-        const timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-
-        let status;
-        if (diffMs <= 0) {
-          status = '✅ انتهى';
-        } else {
-          const totalMins = Math.floor(diffMs / 60000);
-          const hrs = Math.floor(totalMins / 60);
-          const mins = totalMins % 60;
-          status = hrs > 0 ? `⏳ بعد ${hrs}س ${mins}د` : `⏳ بعد ${mins}د`;
-        }
-
-        return `${nameAr} — **${timeStr}** — ${status}`;
-      });
-
-      await reply(
-`🗓️ **مواقيت الصلاة — الجزائر العاصمة**
-📅 الهجري: ${formatHijriDate(hijri)}
-📆 الميلادي: ${gregorian}
-
-${lines.join('\n')}`
-      );
+      await reply(await buildTimesPayload());
     } catch (err) {
       await reply('❌ تعذّر جلب مواقيت الصلاة: ' + err.message);
     }
@@ -810,6 +840,10 @@ ${lines.join('\n')}`
 }
 /* -------- SLASH COMMAND HANDLER -------- */
 mainBot.on('interactionCreate', async (interaction) => {
+  if (interaction.isButton() && interaction.customId === TIMES_REFRESH_ID) {
+    await handleTimesRefresh(interaction);
+    return;
+  }
   if (!interaction.isChatInputCommand()) return;
   const options = {};
   for (const opt of interaction.options.data) {
