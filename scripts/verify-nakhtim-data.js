@@ -3,15 +3,18 @@
    data/tafsir-muyassar.json.
 
    Fail-safe rule: anything that cannot be proven is a FAIL and no data files are written.
-   The Quran / tafsir text is never altered (only trimmed at its ends); the surah-introduction block that
-   the Muyassar edition glues onto the first ayah of each surah is SPLIT OFF (not edited) and stored apart.
+   Primary Quran text (alquran.cloud quran-uthmani) is never altered mid-text: it is only trimmed and its 112
+   prepended surah Bismillahs are stripped so every ayah matches Hafs numbering (1:1 is kept as Bismillah);
+   the surah-introduction block that the Muyassar edition glues onto the opening ayah(s) of each surah is SPLIT OFF (not edited) and stored apart.
 
    Usage (cmd, from the project folder):
      node scripts/verify-nakhtim-data.js                 text + tafsir (about 1-2 minutes)
      node scripts/verify-nakhtim-data.js --audio         + per-ayah audio, 3 reciters x 6,236 files (several minutes, resumable)
      node scripts/verify-nakhtim-data.js --fullsurah     + full-surah audio from mp3quran.net
+     node scripts/verify-nakhtim-data.js --pdf           + 114 Hafs surah PDFs + 30 Ajza' + full Medina Mushaf PDF
+     node scripts/verify-nakhtim-data.js --images        + 6,236 high-res ayah Mushaf PNGs (resumable)
      node scripts/verify-nakhtim-data.js --all           everything
-   Options: --text-b=alquran-cloud (default) | fawaz-nodiacritics (NOT independent, only a fallback)
+   Options: --text-b=fawaz-uthmani (default) | fawaz-nodiacritics (cross-check source)
             --tafsir-b=alquran-cloud (default) | none */
 'use strict';
 const fs = require('fs');
@@ -27,6 +30,8 @@ const val = (n, d) => { const a = argv.find((x) => x.startsWith(`--${n}=`)); ret
 const DO_ALL = has('all');
 const DO_AUDIO = DO_ALL || has('audio');
 const DO_FULL = DO_ALL || has('fullsurah');
+const DO_PDF = DO_ALL || has('pdf');
+const DO_IMAGES = DO_ALL || has('images');
 
 /* ---------------- configuration ---------------- */
 const FAWAZ_QURAN = [
@@ -40,6 +45,10 @@ const TAFSIR_BASES = [
 const ALQURAN_CLOUD = process.env.NAKHTIM_ALQURAN_BASE || 'https://api.alquran.cloud/v1';
 const EVERYAYAH = process.env.NAKHTIM_EVERYAYAH_BASE || 'https://everyayah.com/data';
 const MP3QURAN_API = process.env.NAKHTIM_MP3QURAN_API || 'https://www.mp3quran.net/api/v3';
+const PDF_QURAN_PAGE = process.env.NAKHTIM_PDF_PAGE || 'https://www.pdfquran.com/standard1/chapters/';
+const AYAH_IMAGES_BASE = process.env.NAKHTIM_IMAGES_BASE || 'https://cdn.islamic.network/quran/images/high-resolution';
+const ARCHIVE_AJZA_ID = '01_20200522_20200522';
+const ARCHIVE_FULL_MUSHAF_URL = 'https://archive.org/download/MushafMadinaHafsGreen1441/MushafMadinaHafsGreen1441.pdf';
 
 // Folder names on everyayah.com. The script confirms each one exists before the big run.
 const RECITERS = [
@@ -47,7 +56,7 @@ const RECITERS = [
   { key: 'ghamdi', name: 'سعد الغامدي', folder: 'Ghamadi_40kbps', fullSurahName: /الغامدي/ },
   { key: 'husary', name: 'محمود خليل الحصري', folder: 'Husary_128kbps', fullSurahName: /الحصري/ }
 ];
-const DISCORD_UPLOAD_LIMIT = 10 * 1024 * 1024; // assumed bot upload limit; confirm before relying on it
+const DISCORD_UPLOAD_LIMIT = 20 * 1024 * 1024; // 20 MiB default per Discord Developer Docs (reference#uploading-files)
 const EMBED_LIMIT = 4096;
 
 // Ayah count of each surah (Hafs numbering, Bismillah of Al-Fatiha counted as ayah 1).
@@ -96,8 +105,9 @@ async function pool(items, limit, worker) {
 
 /* ---------------- text helpers (comparison only, never applied to stored text) ---------------- */
 const MARKS = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640\u08D3-\u08FF]/g;
-const norm = (s) => s.normalize('NFC').replace(MARKS, '').replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ک/g, 'ك').replace(/\s+/g, ' ').trim();
-const loose = (s) => norm(s).replace(/[ءؤئا]/g, '').replace(/ة/g, 'ه').replace(/ي/g, '');
+const INVIS = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+const norm = (s) => s.normalize('NFC').replace(INVIS, '').replace(MARKS, '').replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ک/g, 'ك').replace(/\s+/g, ' ').trim();
+const loose = (s) => norm(s).replace(/ؤ/g, 'و').replace(/[ءئا]/g, '').replace(/ة/g, 'ه').replace(/ي/g, '');
 const BISM = 'بسم الله الرحمن الرحيم';
 function stripLeadingBasmala(raw) {
   const w = raw.trim().split(/\s+/);
@@ -121,22 +131,56 @@ const key = (s, a) => `${s}:${a}`;
 /* ---------------- 1. Quran text ---------------- */
 async function checkText() {
   head('1. Quran text');
-  const info = await getJson(FAWAZ_QURAN.map((b) => `${b}/info.json`));
-  const names = info.chapters.map((c) => c.arabicname);
-  const infoCounts = info.chapters.map((c) => c.verses.length);
-  if (names.length === 114 && names.every((n) => n && n.trim())) ok('surah names: 114 present'); else fail('surah names missing');
-  if (infoCounts.every((n, i) => n === COUNTS[i])) ok('ayah counts in the metadata file match the built-in table (6,236 total)'); else fail('ayah counts differ between metadata and built-in table');
+  const failsBefore = failures;
   if (COUNTS.reduce((a, b) => a + b, 0) !== 6236) fail('built-in count table does not sum to 6236');
 
-  // Source A: Uthmani Hafs with diacritics (this is what the bot will display)
-  const a = await getJson(FAWAZ_QURAN.map((b) => `${b}/editions/ara-quranuthmanihaf.json`));
+  // Source A: Uthmani Hafs with diacritics (alquran.cloud quran-uthmani — this is what the bot will display)
+  const j = await getJson([`${ALQURAN_CLOUD}/quran/quran-uthmani`]);
+  const list = j?.data?.surahs;
+  if (!Array.isArray(list) || list.length !== 114) {
+    fail(`source A (alquran-cloud quran-uthmani): unexpected response shape (${Array.isArray(list) ? list.length : 'not array'} surahs)`);
+    return { surahs: [], names: [], textOk: false };
+  }
+  const names = list.map((su) => (su.name || '').trim());
+  if (names.length === 114 && names.every(Boolean)) ok('surah names: 114 present'); else fail('surah names missing');
+  if (list.every((su, i) => su.number === i + 1 && Array.isArray(su.ayahs) && su.ayahs.length === COUNTS[i])) ok('ayah counts in source A match the built-in table (6,236 total)');
+  else fail('ayah counts differ between source A and built-in table');
+
   const A = new Map();
-  let repairedA = 0;
-  for (const v of a.quran) { const r = repairGap(v.text); if (r.changed) repairedA++; A.set(key(v.chapter, v.verse), r.text); }
-  say(`  info: repaired the stray space after a diacritic before a lone alef/ya in ${repairedA} ayahs of source A (the only edit made to the text)`);
+  const juzMap = new Map();
+  let stripped = 0, invisA = 0, prevJuz = 0, juzBad = false;
+  for (const su of list) {
+    const firstJ = su.ayahs[0]?.juz;
+    const lastJ = su.ayahs[su.ayahs.length - 1]?.juz;
+    for (const ay of su.ayahs) {
+      let t = typeof ay.text === 'string' ? ay.text.trim() : '';
+      if (ay.numberInSurah === 1 && su.number !== 1 && su.number !== 9) {
+        const t2 = stripLeadingBasmala(t);
+        if (t2 !== t) { stripped++; t = t2.trim(); }
+      }
+      if (/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/.test(t)) invisA++;
+      A.set(key(su.number, ay.numberInSurah), t);
+
+      const jNum = ay.juz;
+      if (!Number.isInteger(jNum) || jNum < 1 || jNum > 30 || (prevJuz && jNum !== prevJuz && jNum !== prevJuz + 1)) juzBad = true;
+      prevJuz = jNum;
+      if (!juzMap.has(jNum)) juzMap.set(jNum, { juz: jNum, start: [su.number, ay.numberInSurah], end: [su.number, ay.numberInSurah], wholeSurahs: [] });
+      juzMap.get(jNum).end = [su.number, ay.numberInSurah];
+    }
+    if (firstJ && firstJ === lastJ && juzMap.has(firstJ)) juzMap.get(firstJ).wholeSurahs.push(su.number);
+  }
+  const juzBounds = Array.from({ length: 30 }, (_, i) => juzMap.get(i + 1)).filter(Boolean);
+  if (juzBounds.length === 30 && !juzBad && juzBounds[0].start[0] === 1 && juzBounds[29].end[0] === 114 && juzBounds[29].end[1] === 6) {
+    ok('30 Ajza\' boundaries computed continuously from 1:1 to 114:6');
+  } else {
+    fail(`unexpected Juz boundaries (found ${juzBounds.length}, gap=${juzBad})`);
+  }
+  if (stripped === 112) ok('source A (alquran-cloud quran-uthmani): stripped 112 prepended surah Bismillahs (1:1 kept)');
+  else fail(`source A: expected to strip 112 prepended surah Bismillahs, stripped ${stripped}`);
+  say(`  info: ${invisA} ayahs in source A contain invisible direction marks after trimming (no mid-text edits needed)`);
   const residual = [...A.entries()].filter(([, t]) => LONE_LETTER.test(t)).map(([k]) => k);
-  if (residual.length) fail(`source A still has a lone alef/ya word after the repair in ${residual.length} ayahs (e.g. ${residual.slice(0, 5).join(', ')})`); else ok('source A: no stray lone-letter words remain after the repair');
-  if (a.quran.length === 6236 && A.size === 6236) ok('source A (fawazahmed0 ara-quranuthmanihaf): 6,236 ayahs'); else fail(`source A has ${a.quran.length} entries / ${A.size} unique`);
+  if (residual.length) fail(`source A has a lone alef/ya word in ${residual.length} ayahs (e.g. ${residual.slice(0, 5).join(', ')})`); else ok('source A: no stray lone-letter words');
+  if (A.size === 6236) ok('source A (alquran-cloud quran-uthmani): 6,236 ayahs'); else fail(`source A has ${A.size} unique ayahs, expected 6236`);
 
   const surahs = [];
   let bad = 0;
@@ -155,21 +199,24 @@ async function checkText() {
   for (let s = 1; s <= 114; s++) surahs.push({ n: s, name: names[s - 1], ayahs: Array.from({ length: COUNTS[s - 1] }, (_, i) => (A.get(key(s, i + 1)) ?? '').trim()) });
 
   // Source B: independent comparison copy
-  const mode = val('text-b', 'alquran-cloud');
+  const mode = val('text-b', 'fawaz-uthmani');
   const B = new Map();
-  let stripped = 0;
   try {
-    if (mode === 'alquran-cloud') {
-      const j = await getJson([`${ALQURAN_CLOUD}/quran/quran-uthmani`]);
-      const list = j?.data?.surahs;
-      if (!Array.isArray(list)) throw new Error('unexpected response shape (no data.surahs)');
-      for (const su of list) for (const ay of su.ayahs) {
-        let t = ay.text;
-        if (ay.numberInSurah === 1 && su.number !== 1 && su.number !== 9) { const t2 = stripLeadingBasmala(t); if (t2 !== t) { stripped++; t = t2; } }
-        B.set(key(su.number, ay.numberInSurah), t);
+    if (mode === 'fawaz-uthmani') {
+      const info = await getJson(FAWAZ_QURAN.map((b) => `${b}/info.json`));
+      const infoCounts = info.chapters.map((c) => c.verses.length);
+      if (infoCounts.every((n, i) => n === COUNTS[i])) ok('source B metadata ayah counts match the built-in table (6,236 total)');
+      else fail('ayah counts differ between source B metadata and built-in table');
+      const b = await getJson(FAWAZ_QURAN.map((x) => `${x}/editions/ara-quranuthmanihaf.json`));
+      let repairedB = 0;
+      for (const v of b.quran) {
+        const r = repairGap(v.text);
+        if (r.changed) repairedB++;
+        B.set(key(v.chapter, v.verse), r.text);
       }
+      say(`  info: applied spacing repair in memory only to ${repairedB} ayahs of source B for cross-checking`);
     } else if (mode === 'fawaz-nodiacritics') {
-      warn('source B is ara-quranuthmanihaf1 from the SAME project as A: this only catches transcription slips, it is NOT an independent source');
+      warn('source B is ara-quranuthmanihaf1 (nodiacritics) for cross-check comparison');
       const b = await getJson(FAWAZ_QURAN.map((x) => `${x}/editions/ara-quranuthmanihaf1.json`));
       for (const v of b.quran) B.set(key(v.chapter, v.verse), v.text);
     } else throw new Error(`unknown --text-b=${mode}`);
@@ -177,25 +224,28 @@ async function checkText() {
     fail(`source B (${mode}) could not be loaded: ${err.message}. The text cannot be cross-checked, so it is NOT approved.`);
     return { surahs, names, textOk: false };
   }
-  if (B.size === 6236) ok(`source B (${mode}): 6,236 ayahs${stripped ? `; removed a glued Bismillah from ${stripped} first ayahs (expected 112)` : ''}`); else fail(`source B has ${B.size} ayahs, expected 6236`);
-  if (mode === 'alquran-cloud' && stripped !== 112) warn(`expected 112 glued Bismillahs in source B, found ${stripped}; check the mismatch list below`);
+  if (B.size === 6236) ok(`source B (${mode}): 6,236 ayahs`); else fail(`source B has ${B.size} ayahs, expected 6236`);
 
   const hard = [];
+  const spacing = [];
   const soft = [];
   for (let s = 1; s <= 114; s++) for (let n = 1; n <= COUNTS[s - 1]; n++) {
     const ta = A.get(key(s, n)) ?? '';
     const tb = B.get(key(s, n));
     if (tb === undefined) { hard.push({ s, n, ta, tb: '(missing)' }); continue; }
     if (norm(ta) === norm(tb)) continue;
+    if (norm(ta).replace(/\s+/g, '') === norm(tb).replace(/\s+/g, '')) { spacing.push({ s, n, ta, tb }); continue; }
     if (loose(ta) === loose(tb)) soft.push({ s, n, ta, tb }); else hard.push({ s, n, ta, tb });
   }
-  if (!hard.length) ok(`A and B agree on all ayahs after removing diacritics${soft.length ? ` (${soft.length} differ only in hamza/alef spelling: see list)` : ''}`);
+  if (!hard.length) ok(`A and B agree on all ayahs after removing diacritics${spacing.length || soft.length ? ` (${spacing.length} spacing-only, ${soft.length} hamza/alef/ya spelling-only: see lists)` : ''}`);
   else fail(`${hard.length} ayahs differ between A and B beyond spelling: see list below`);
+  if (spacing.length) warn(`${spacing.length} ayahs have identical letters and differ only in word-joining spaces between editions (review them)`);
   if (soft.length) warn(`${soft.length} ayahs differ only in hamza/alef/ya spelling (review them)`);
   const dump = (label, arr) => { if (arr.length) { say(`  ${label}:`); for (const m of arr.slice(0, 40)) say(`    ${m.s}:${m.n}\n      A: ${m.ta}\n      B: ${m.tb}`); if (arr.length > 40) say(`    ... and ${arr.length - 40} more`); } };
   dump('DIFFERENT TEXT', hard);
+  dump('SPACING-ONLY DIFFERENCES', spacing);
   dump('SPELLING-ONLY DIFFERENCES', soft);
-  return { surahs, names, textOk: !bad && !hard.length && B.size === 6236 };
+  return { surahs, names, juzBounds, textOk: failures === failsBefore };
 }
 
 /* ---------------- 2. Al-Muyassar tafsir ---------------- */
@@ -221,6 +271,7 @@ function splitIntro(text) {
 
 async function checkTafsir(quran) {
   head('2. Tafsir al-Muyassar');
+  const failsBefore = failures;
   const tafsir = []; // tafsir[s-1][n-1] = text
   const intro = {};  // intro[s] = surah introduction block that the edition glues onto ayah 1
   const problems = [];
@@ -228,7 +279,7 @@ async function checkTafsir(quran) {
   await pool(Array.from({ length: 114 }, (_, i) => i + 1), 6, async (s) => {
     try { fetched[s] = await getJson(TAFSIR_BASES.map((b) => `${b}/${s}.json`)); } catch (err) { fetched[s] = { error: err.message }; }
   });
-  let introCount = 0, glued = 0, empty = 0, dup = 0, tooLong = 0, short = [], withCr = 0, withTag = 0, maxLen = 0;
+  let introCount = 0, introOnLater = 0, glued = 0, empty = 0, dup = 0, tooLong = 0, short = [], strayMarker = [], withCr = 0, withTag = 0, maxLen = 0;
   for (let s = 1; s <= 114; s++) {
     const f = fetched[s];
     if (!Array.isArray(f)) { problems.push(`surah ${s}: download failed (${f?.error ?? 'bad response'})`); tafsir.push([]); continue; }
@@ -238,11 +289,17 @@ async function checkTafsir(quran) {
       const e = f[n - 1];
       if (!e || e.surah !== s || e.ayah !== n || typeof e.text !== 'string') { problems.push(`${s}:${n}: entry missing or mislabeled (${e ? `${e.surah}:${e.ayah}` : 'none'})`); row.push(''); continue; }
       let text = e.text.trim();
-      if (n === 1 && /^تسمية السورة/.test(text)) {
+      if (/^تسمية السورة/.test(text)) {
         const r = splitIntro(text);
-        if (r.error) { glued++; problems.push(`${s}:1: surah-introduction block cannot be split safely (${r.error})`); }
-        else { intro[s] = r.intro; text = r.tafsir; introCount++; }
+        if (r.error) { glued++; problems.push(`${s}:${n}: surah-introduction block cannot be split safely (${r.error})`); }
+        else if (n === 1) { intro[s] = r.intro; text = r.tafsir; introCount++; }
+        else if (intro[s] && r.intro === intro[s]) { text = r.tafsir; introOnLater++; }
+        else { glued++; problems.push(`${s}:${n}: surah-introduction block on ayah > 1 does not match ayah 1`); }
       }
+      if (text.includes('تسمية السورة') || text.includes('من مقاصد السورة')) {
+        glued++; problems.push(`${s}:${n}: leftover surah-introduction heading in tafsir`);
+      }
+      if (text.includes('[التفسير]')) strayMarker.push(`${s}:${n}`);
       if (!text) { empty++; problems.push(`${s}:${n}: empty tafsir`); }
       if (text && text.length < 12) short.push(`${s}:${n} (${text.length} chars)`);
       if (row.length && row[row.length - 1] && text === row[row.length - 1]) dup++;
@@ -257,9 +314,11 @@ async function checkTafsir(quran) {
   if (!problems.length && !empty) ok('114 surahs downloaded; every ayah has its own non-empty tafsir entry, numbering 1..n matches the ayah counts');
   else { fail(`${problems.length} structural problems with the tafsir data`); for (const p of problems.slice(0, 40)) say(`    ${p}`); if (problems.length > 40) say(`    ... and ${problems.length - 40} more`); }
   say(`  info: ${introCount} surahs carry an introduction block on ayah 1; it was split off and stored apart (not part of the ayah tafsir)`);
+  if (introOnLater) say(`  info: also split off the identical repeated introduction block from ${introOnLater} later ayahs belonging to opening groups`);
   if (introCount !== 114 && !glued) say(`  info: the other ${114 - introCount} surahs have no introduction block`);
   say(`  info: longest tafsir entry is ${maxLen} characters; ${tooLong} exceed the ${EMBED_LIMIT} embed limit and would need splitting`);
   say(`  info: ${dup} ayahs share an identical tafsir with the previous ayah: Muyassar comments on groups of ayahs (e.g. 2:45-46), so the same text is repeated for each ayah of the group`);
+  if (strayMarker.length) warn(`${strayMarker.length} entries contain a stray "[التفسير]" marker inside the tafsir text (review): ${strayMarker.join(', ')}`);
   if (short.length) warn(`very short tafsir entries (review): ${short.slice(0, 25).join(', ')}${short.length > 25 ? ' ...' : ''}`);
   if (withCr) warn(`${withCr} entries contain carriage returns`);
   if (withTag) warn(`${withTag} entries contain HTML-like tags`);
@@ -293,13 +352,13 @@ async function checkTafsir(quran) {
       alignOk = false;
     }
   }
-  return { tafsir, intro, tafsirOk: !problems.length && !empty && alignOk };
+  return { tafsir, intro, tafsirOk: failures === failsBefore };
 }
 
 /* ---------------- spot samples ---------------- */
 function samples(quran, tafsir, intro) {
   head('Samples to compare with a trusted mushaf and tafsir book');
-  const picks = [[1, 1], [1, 7], [2, 255], [2, 282], [9, 1], [18, 10], [112, 1], [114, 6]];
+  const picks = [[1, 1], [1, 4], [1, 7], [2, 255], [2, 282], [9, 1], [18, 10], [112, 1], [114, 6]];
   for (const [s, n] of picks) {
     const t = quran.surahs[s - 1]?.ayahs[n - 1];
     say(`${s}:${n}  (${quran.surahs[s - 1]?.name})`);
@@ -311,11 +370,17 @@ function samples(quran, tafsir, intro) {
 }
 
 /* ---------------- 3. per-ayah audio ---------------- */
+const isOkStatus = (st) => st === 200 || st === 206;
 async function headSize(url) {
   let res = await fetchRetry(url, { method: 'HEAD' });
-  if (res.status === 405 || res.status === 501) res = await fetchRetry(url, { headers: { Range: 'bytes=0-0' } });
+  if (res.status === 405 || res.status === 501) {
+    await res.body?.cancel?.().catch(() => {});
+    res = await fetchRetry(url, { headers: { Range: 'bytes=0-0' } });
+  }
   const len = Number((res.headers.get('content-range') || '').split('/')[1] || res.headers.get('content-length') || 0);
-  return { status: res.status, bytes: len, type: res.headers.get('content-type') || '' };
+  const type = res.headers.get('content-type') || '';
+  await res.body?.cancel?.().catch(() => {});
+  return { status: res.status, bytes: len, type };
 }
 async function checkAudio() {
   head('3. Per-ayah audio (everyayah.com)');
@@ -331,10 +396,10 @@ async function checkAudio() {
 
   for (const r of RECITERS) {
     const probe = await headSize(`${EVERYAYAH}/${r.folder}/001001.mp3`).catch((e) => ({ status: 0, err: e.message }));
-    if (probe.status !== 200) { fail(`${r.name}: folder "${r.folder}" does not serve 001001.mp3 (${probe.err ?? `HTTP ${probe.status}`}). Fix the folder name at the top of the script.`); continue; }
+    if (!isOkStatus(probe.status)) { fail(`${r.name}: folder "${r.folder}" does not serve 001001.mp3 (${probe.err ?? `HTTP ${probe.status}`}). Fix the folder name at the top of the script.`); continue; }
     const results = cache[r.folder] || (cache[r.folder] = {});
     const todo = [];
-    for (let s = 1; s <= 114; s++) for (let n = 1; n <= COUNTS[s - 1]; n++) if (!results[`${pad3(s)}${pad3(n)}`]) todo.push([s, n]);
+    for (let s = 1; s <= 114; s++) for (let n = 1; n <= COUNTS[s - 1]; n++) if (!isOkStatus(results[`${pad3(s)}${pad3(n)}`]?.status)) todo.push([s, n]);
     say(`  ${r.name} (${r.folder}): ${6236 - todo.length} already verified, ${todo.length} to check`);
     let done = 0;
     await pool(todo, 8, async ([s, n]) => {
@@ -345,21 +410,22 @@ async function checkAudio() {
       } catch (err) { results[id] = { status: 0, bytes: 0, type: err.message }; }
       if (++done % 500 === 0) { fs.mkdirSync(DATA, { recursive: true }); fs.writeFileSync(cacheFile, JSON.stringify(cache)); process.stdout.write(`    ${done}/${todo.length}\r`); }
     });
-    // failures are retried on the next run instead of being remembered as good
-    for (const id of Object.keys(results)) if (results[id].status !== 200) { /* keep for the report below */ }
     fs.mkdirSync(DATA, { recursive: true });
     const good = {};
-    for (const [id, v] of Object.entries(results)) if (v.status === 200) good[id] = v;
+    for (const [id, v] of Object.entries(results)) if (isOkStatus(v.status)) good[id] = v;
     const missing = [], tiny = [], odd = [];
     for (let s = 1; s <= 114; s++) for (let n = 1; n <= COUNTS[s - 1]; n++) {
       const id = `${pad3(s)}${pad3(n)}`;
       const v = results[id];
-      if (!v || v.status !== 200) missing.push(`${s}:${n} (${v ? `HTTP ${v.status} ${v.type}`.trim() : 'not checked'})`);
+      if (!v || !isOkStatus(v.status)) missing.push(`${s}:${n} (${v ? `HTTP ${v.status} ${v.type}`.trim() : 'not checked'})`);
       else { if (v.bytes < 8000) tiny.push(`${s}:${n} (${v.bytes} bytes)`); if (!/audio|mpeg|octet/i.test(v.type)) odd.push(`${s}:${n} (${v.type})`); }
     }
     cache[r.folder] = good; // only verified files are remembered
     fs.writeFileSync(cacheFile, JSON.stringify(cache));
     if (!missing.length) ok(`${r.name}: all 6,236 files exist`); else { fail(`${r.name}: ${missing.length} files missing`); for (const m of missing.slice(0, 30)) say(`    ${m}`); }
+    let maxBytes = 0, maxId = '';
+    for (const [id, v] of Object.entries(good)) if (v.bytes > maxBytes) { maxBytes = v.bytes; maxId = id; }
+    if (maxId) say(`  info: ${r.name}: largest ayah ${maxId} (${(maxBytes / 1024).toFixed(0)} KB); samples: ${EVERYAYAH}/${r.folder}/001001.mp3 , ${EVERYAYAH}/${r.folder}/112001.mp3`);
     if (tiny.length) warn(`${r.name}: ${tiny.length} suspiciously small files: ${tiny.slice(0, 15).join(', ')}`);
     if (odd.length) warn(`${r.name}: ${odd.length} files with a non-audio content type: ${odd.slice(0, 10).join(', ')}`);
 
@@ -396,22 +462,277 @@ async function checkFullSurah() {
     let tested = 0;
     for (const c of cands) for (const m of c.moshaf || []) {
       say(`    candidate: reciter "${c.name}" | recording "${m.name}" | ${m.surah_total} surahs | ${m.server}`);
-      if (Number(m.surah_total) < 114 || tested >= 4) continue;
+      if (Number(m.surah_total) < 114) continue;
       tested++;
       const server = m.server.endsWith('/') ? m.server : `${m.server}/`;
       const sizes = new Array(115).fill(0);
       const bad = [];
       await pool(Array.from({ length: 114 }, (_, i) => i + 1), 6, async (s) => {
-        try { const h = await headSize(`${server}${pad3(s)}.mp3`); if (h.status === 200 && h.bytes > 50000) sizes[s] = h.bytes; else bad.push(`${s} (HTTP ${h.status})`); } catch (err) { bad.push(`${s} (${err.message})`); }
+        try {
+          const h = await headSize(`${server}${pad3(s)}.mp3`);
+          if (isOkStatus(h.status) && h.bytes > 50000) sizes[s] = h.bytes;
+          else bad.push(isOkStatus(h.status) ? `${s} (small: ${h.bytes} bytes)` : `${s} (HTTP ${h.status})`);
+        } catch (err) { bad.push(`${s} (${err.message})`); }
       });
-      const over = sizes.map((b, s) => ({ b, s })).filter((x) => x.b > DISCORD_UPLOAD_LIMIT).length;
+      const over20 = sizes.slice(1).filter((b) => b > DISCORD_UPLOAD_LIMIT).length;
+      const over10 = sizes.slice(1).filter((b) => b > 10 * 1024 * 1024).length;
+      let maxB = 0, maxS = 0;
+      for (let s = 1; s <= 114; s++) if (sizes[s] > maxB) { maxB = sizes[s]; maxS = s; }
       const total = sizes.reduce((a, b) => a + b, 0);
-      if (!bad.length) { anyComplete = true; ok(`${r.name} / "${m.name}": all 114 surahs exist (${(total / 1048576).toFixed(0)} MB total). ${114 - over} fit under the upload limit, ${over} need a link instead of an attachment`); }
-      else warn(`${r.name} / "${m.name}": ${bad.length} surahs failed: ${bad.slice(0, 10).join(', ')}`);
+      if (!bad.length) {
+        anyComplete = true;
+        ok(`${r.name} / "${c.name}" / "${m.name}": all 114 surahs exist (${(total / 1048576).toFixed(0)} MiB total, largest surah ${maxS}: ${(maxB / 1048576).toFixed(1)} MiB). ${114 - over20}/114 fit under 20 MiB (${over20} need a link); ${114 - over10}/114 fit under 10 MiB; samples: ${server}001.mp3 , ${server}112.mp3`);
+      } else warn(`${r.name} / "${c.name}" / "${m.name}": ${bad.length} surahs failed: ${bad.slice(0, 10).join(', ')}`);
     }
     if (!anyComplete) fail(`${r.name}: no complete 114-surah recording found on mp3quran.net`);
   }
   say('  note: the owner must listen to a few full-surah files and confirm each is the same reciter as the per-ayah recordings.');
+}
+
+/* ---------------- 5. surah PDFs, 30 Ajza' & Full Medina Mushaf PDF ---------------- */
+async function streamPdfPrefix(url) {
+  const res = await fetchRetry(url);
+  const type = res.headers.get('content-type') || '';
+  if (!isOkStatus(res.status)) return { status: res.status, type, magic: '' };
+  if (res.body?.getReader) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let got = 0;
+    try {
+      while (got < 5) {
+        const { value, done } = await reader.read();
+        if (done || !value) break;
+        chunks.push(Buffer.from(value));
+        got += value.length;
+      }
+    } finally {
+      try { await reader.cancel(); } catch {}
+    }
+    return { status: res.status, type, magic: Buffer.concat(chunks).subarray(0, 5).toString('latin1') };
+  }
+  const b = Buffer.from(await res.arrayBuffer());
+  return { status: res.status, type, magic: b.subarray(0, 5).toString('latin1') };
+}
+
+async function checkPdfs(juzBounds) {
+  head('5. Surah PDFs (pdfquran.com standard1) + 30 Ajza\' & Full Medina Mushaf (archive.org)');
+  const failsBefore = failures;
+  let html;
+  try {
+    const res = await fetchRetry(PDF_QURAN_PAGE);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    html = await res.text();
+  } catch (err) {
+    fail(`pdfquran.com standard1 index unreachable: ${err.message}`);
+    return null;
+  }
+
+  const slugs = [];
+  const seen = new Set();
+  for (const m of html.matchAll(/href=["'](?:https?:\/\/(?:www\.)?pdfquran\.com)?(\/standard1\/surah\/([^/"'#?]+)\/?)["']/gi)) {
+    const slug = m[2];
+    if (!seen.has(slug)) { seen.add(slug); slugs.push(slug); }
+  }
+  const anchors = [[0, 'al-fatihah'], [1, 'al-baqarah'], [8, 'at-tawbah'], [17, 'al-kahf'], [111, 'al-ikhlas'], [113, 'an-nas']];
+  const anchorsOk = slugs.length === 114 && anchors.every(([idx, expected]) => slugs[idx]?.toLowerCase() === expected);
+  if (!anchorsOk) {
+    fail(`expected 114 ordered standard1 surah slugs, found ${slugs.length} (sample: ${slugs[0]}, ${slugs[1]}, ${slugs[113]})`);
+    return null;
+  }
+  ok('found all 114 ordered Medina Mushaf surah slugs on pdfquran.com/standard1');
+
+  const surahUrls = slugs.map((slug) => new URL(`/standard1/surah/${slug}/download/pdf/`, PDF_QURAN_PAGE).href);
+  const bad = [];
+  await pool(surahUrls.map((url, idx) => ({ num: idx + 1, url })), 4, async ({ num, url }) => {
+    try {
+      const p = await streamPdfPrefix(url);
+      if (!isOkStatus(p.status) || !/pdf/i.test(p.type) || p.magic !== '%PDF-') {
+        bad.push(`${num} (HTTP ${p.status}, ${p.type || 'no-type'}, magic=${JSON.stringify(p.magic)})`);
+      }
+    } catch (err) { bad.push(`${num} (${err.message})`); }
+  });
+  if (!bad.length) ok('all 114 surah PDFs return application/pdf and start with valid %PDF- header');
+  else fail(`${bad.length} surah PDFs failed: ${bad.slice(0, 15).join(', ')}`);
+
+  try {
+    const res = await fetchRetry(surahUrls[1]);
+    const buf = Buffer.from(await res.arrayBuffer());
+    const mb = (buf.length / 1048576).toFixed(2);
+    if (isOkStatus(res.status) && buf.subarray(0, 5).toString('latin1') === '%PDF-' && buf.length > 500000 && buf.length <= DISCORD_UPLOAD_LIMIT) {
+      ok(`largest surah PDF (2 Al-Baqarah) fits Discord 20 MiB limit (${mb} MiB, valid %PDF-)`);
+    } else {
+      fail(`largest surah PDF (2 Al-Baqarah) failed size/header check (HTTP ${res.status}, ${mb} MiB)`);
+    }
+  } catch (err) {
+    fail(`largest surah PDF (2 Al-Baqarah) download failed: ${err.message}`);
+  }
+
+  // 30 Ajza' Medina Mushaf PDFs (archive.org)
+  let ajza = [];
+  try {
+    const meta = await getJson([`https://archive.org/metadata/${ARCHIVE_AJZA_ID}`]);
+    const files = (meta?.files || [])
+      .filter((f) => /\.pdf$/i.test(f.name) && !/_text\.pdf$/i.test(f.name))
+      .map((f) => ({ juz: Number((/^(\d{1,2})\b/.exec(f.name) || [])[1]), name: f.name, bytes: Number(f.size || 0) }))
+      .filter((f) => f.juz >= 1 && f.juz <= 30)
+      .sort((a, b) => a.juz - b.juz);
+    if (files.length !== 30 || files.some((f, i) => f.juz !== i + 1)) {
+      fail(`expected 30 numbered Ajza' PDFs in archive.org/${ARCHIVE_AJZA_ID}, found ${files.length}`);
+    } else {
+      ok(`found all 30 Ajza' PDFs in archive.org/${ARCHIVE_AJZA_ID}`);
+      const badAjza = [];
+      const juzUrls = files.map((f) => ({ ...f, url: `https://archive.org/download/${ARCHIVE_AJZA_ID}/${encodeURIComponent(f.name)}` }));
+      await pool(juzUrls, 6, async (item) => {
+        try {
+          const h = await headSize(item.url);
+          if (!isOkStatus(h.status) || h.bytes < 500000) badAjza.push(`Juz ${item.juz} (HTTP ${h.status}, ${h.bytes}B)`);
+          else item.bytes = h.bytes;
+        } catch (err) { badAjza.push(`Juz ${item.juz} (${err.message})`); }
+      });
+      if (!badAjza.length) ok('all 30 Ajza\' PDFs reachable and >500 KB');
+      else fail(`Ajza' PDF failures: ${badAjza.join(', ')}`);
+
+      const sampleAjza = [1, 2, 15, 28, 29, 30];
+      const badJuzMagic = [];
+      for (const j of sampleAjza) {
+        try {
+          const res = await fetchRetry(juzUrls[j - 1].url, { headers: { Range: 'bytes=0-4' } });
+          const b = Buffer.from(await res.arrayBuffer());
+          if (!isOkStatus(res.status) || b.toString('latin1', 0, 5) !== '%PDF-') badJuzMagic.push(j);
+        } catch { badJuzMagic.push(j); }
+      }
+      if (!badJuzMagic.length) ok(`${sampleAjza.length} sampled Ajza' PDFs start with valid %PDF- header`);
+      else fail(`Ajza' PDFs without %PDF- header: ${badJuzMagic.join(', ')}`);
+
+      const overJuz = juzUrls.filter((x) => x.bytes > DISCORD_UPLOAD_LIMIT).length;
+      say(`  info: Ajza' PDFs ${30 - overJuz}/30 fit under 20 MiB (${overJuz} link-only: Juz ${juzUrls.filter((x) => x.bytes > DISCORD_UPLOAD_LIMIT).map((x) => x.juz).join(', ') || 'none'})`);
+      ajza = juzUrls.map((x) => {
+        const b = juzBounds?.[x.juz - 1] || {};
+        return { juz: x.juz, start: b.start, end: b.end, wholeSurahs: b.wholeSurahs || [], url: x.url, bytes: x.bytes };
+      });
+    }
+  } catch (err) {
+    fail(`archive.org Ajza' metadata check failed: ${err.message}`);
+  }
+
+  // Full Medina Mushaf PDF (archive.org Green 1441)
+  let fullBytes = 0;
+  try {
+    const h = await headSize(ARCHIVE_FULL_MUSHAF_URL);
+    const res = await fetchRetry(ARCHIVE_FULL_MUSHAF_URL, { headers: { Range: 'bytes=0-4' } });
+    const b = Buffer.from(await res.arrayBuffer());
+    if (isOkStatus(h.status) && h.bytes > 10 * 1024 * 1024 && isOkStatus(res.status) && b.toString('latin1', 0, 5) === '%PDF-') {
+      fullBytes = h.bytes;
+      ok(`Full Medina Mushaf PDF verified (${(fullBytes / 1048576).toFixed(2)} MiB, valid %PDF-): ${ARCHIVE_FULL_MUSHAF_URL}`);
+    } else {
+      fail(`Full Medina Mushaf PDF invalid (HTTP ${h.status}, ${h.bytes}B)`);
+    }
+  } catch (err) {
+    fail(`Full Medina Mushaf PDF unreachable: ${err.message}`);
+  }
+
+  return {
+    urls: surahUrls,
+    juzData: {
+      source: 'مصحف المدينة النبوية (حفص عن عاصم — طبعة مجمع الملك فهد)',
+      fullQuran: {
+        url: ARCHIVE_FULL_MUSHAF_URL,
+        bytes: fullBytes,
+        label: 'مصحف المدينة النبوية كاملاً (حفص عن عاصم — طبعة 1441هـ)'
+      },
+      ajza
+    },
+    pdfOk: failures === failsBefore && ajza.length === 30 && fullBytes > 0
+  };
+}
+
+/* ---------------- 6. high-resolution ayah Mushaf images ---------------- */
+async function probePngHeader(url) {
+  const res = await fetchRetry(url, { headers: { Range: 'bytes=0-28' } });
+  const type = res.headers.get('content-type') || '';
+  if (!isOkStatus(res.status)) {
+    await res.body?.cancel?.().catch(() => {});
+    return { status: res.status, bytes: 0, type, w: 0, h: 0 };
+  }
+  const b = Buffer.from(await res.arrayBuffer());
+  const bytes = Number((res.headers.get('content-range') || '').split('/')[1] || res.headers.get('content-length') || b.length);
+  const isPng = b.length >= 24 && b.toString('hex', 0, 8) === '89504e470d0a1a0a';
+  const w = isPng ? b.readUInt32BE(16) : 0;
+  const h = isPng ? b.readUInt32BE(20) : 0;
+  return { status: res.status, bytes, type, w, h };
+}
+
+async function checkImages() {
+  head('6. High-resolution ayah Mushaf images (cdn.islamic.network)');
+  const cacheFile = path.join(DATA, 'nakhtim-image-check.json');
+  let cache = {};
+  try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
+
+  const probe = await probePngHeader(`${AYAH_IMAGES_BASE}/1_1.png`).catch((e) => ({ status: 0, err: e.message }));
+  if (!isOkStatus(probe.status) || !probe.w || !probe.h) {
+    fail(`ayah image CDN unreachable or invalid for 1_1.png (${probe.err ?? `HTTP ${probe.status}, ${probe.w}x${probe.h}`})`);
+    return;
+  }
+
+  const todo = [];
+  for (let s = 1; s <= 114; s++) for (let n = 1; n <= COUNTS[s - 1]; n++) {
+    const id = `${s}_${n}`;
+    const v = cache[id];
+    if (!v || !isOkStatus(v.status) || v.bytes < 500 || !v.w || !v.h) todo.push([s, n]);
+  }
+  say(`  ${6236 - todo.length} already verified, ${todo.length} to check`);
+  let done = 0;
+  await pool(todo, 16, async ([s, n]) => {
+    const id = `${s}_${n}`;
+    try {
+      cache[id] = await probePngHeader(`${AYAH_IMAGES_BASE}/${id}.png`);
+    } catch (err) {
+      cache[id] = { status: 0, bytes: 0, type: err.message, w: 0, h: 0 };
+    }
+    if (++done % 500 === 0) {
+      fs.mkdirSync(DATA, { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify(cache));
+      process.stdout.write(`    ${done}/${todo.length}\r`);
+    }
+  });
+
+  const good = {};
+  const missing = [], badType = [];
+  let maxBytes = 0, maxId = '';
+  for (let s = 1; s <= 114; s++) for (let n = 1; n <= COUNTS[s - 1]; n++) {
+    const id = `${s}_${n}`;
+    const v = cache[id];
+    if (!v || !isOkStatus(v.status) || v.bytes < 500 || !v.w || !v.h) {
+      missing.push(`${s}:${n} (${v ? `HTTP ${v.status} ${v.bytes}B ${v.w}x${v.h}` : 'none'})`);
+    } else {
+      good[id] = v;
+      if (v.bytes > maxBytes) { maxBytes = v.bytes; maxId = id; }
+      if (!/png/i.test(v.type)) badType.push(`${s}:${n} (${v.type})`);
+    }
+  }
+  fs.mkdirSync(DATA, { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify(good));
+
+  if (!missing.length) ok('all 6,236 high-resolution ayah PNGs verified (>500 B, valid PNG signature & IHDR)');
+  else { fail(`${missing.length} ayah PNGs missing or invalid`); for (const m of missing.slice(0, 30)) say(`    ${m}`); }
+  if (badType.length) warn(`${badType.length} ayah images had unexpected content-type: ${badType.slice(0, 10).join(', ')}`);
+  if (maxId) say(`  info: largest raw ayah PNG ${maxId} (${(maxBytes / 1024).toFixed(0)} KB, ${good[maxId].w}x${good[maxId].h})`);
+
+  // full download + IEND footer check on 8 representative ayahs
+  const fullSamples = ['1_1', '1_4', '2_255', '2_282', '9_1', '18_10', '112_1', '114_6'];
+  const badFull = [];
+  for (const id of fullSamples) {
+    try {
+      const res = await fetchRetry(`${AYAH_IMAGES_BASE}/${id}.png`);
+      const b = Buffer.from(await res.arrayBuffer());
+      const okPng = isOkStatus(res.status) && b.length > 500 &&
+        b.toString('hex', 0, 8) === '89504e470d0a1a0a' &&
+        b.subarray(-12).toString('hex') === '0000000049454e44ae426082';
+      if (!okPng) badFull.push(id);
+    } catch { badFull.push(id); }
+  }
+  if (!badFull.length) ok(`${fullSamples.length} full ayah PNG downloads verified end-to-end (valid PNG IHDR + IEND)`);
+  else fail(`${badFull.length} full ayah PNG downloads failed IEND check (${badFull.join(', ')})`);
 }
 
 /* ---------------- main ---------------- */
@@ -422,6 +743,8 @@ async function checkFullSurah() {
   if (quran && taf) samples(quran, taf.tafsir, taf.intro);
   if (DO_AUDIO) await checkAudio().catch((e) => fail(`audio check crashed: ${e.message}`));
   if (DO_FULL) await checkFullSurah().catch((e) => fail(`full-surah check crashed: ${e.message}`));
+  const pdf = DO_PDF ? await checkPdfs(quran?.juzBounds).catch((e) => { fail(`PDF check crashed: ${e.message}`); return null; }) : null;
+  if (DO_IMAGES) await checkImages().catch((e) => fail(`images check crashed: ${e.message}`));
 
   head('Result');
   const dataOk = quran?.textOk && taf?.tafsirOk;
@@ -435,9 +758,22 @@ async function checkFullSurah() {
     for (const f of ['quran.json', 'tafsir-muyassar.json']) { try { fs.unlinkSync(path.join(DATA, f)); } catch {} }
     say('  Text/tafsir data NOT written (and any older copy removed): at least one check failed.');
   }
+  if (DO_PDF) {
+    if (pdf?.pdfOk) {
+      fs.mkdirSync(DATA, { recursive: true });
+      fs.writeFileSync(path.join(DATA, 'surah-pdfs.json'), JSON.stringify({ source: 'مصحف المدينة النبوية (حفص عن عاصم — pdfquran.com/standard1)', urls: pdf.urls }));
+      fs.writeFileSync(path.join(DATA, 'juz-pdfs.json'), JSON.stringify(pdf.juzData));
+      say('  Wrote data/surah-pdfs.json and data/juz-pdfs.json');
+    } else {
+      for (const f of ['surah-pdfs.json', 'juz-pdfs.json']) { try { fs.unlinkSync(path.join(DATA, f)); } catch {} }
+      say('  PDF data NOT written (and any older copy removed): PDF check failed.');
+    }
+  }
   say(`  ${failures} failure(s), ${warnings} warning(s). ${failures ? 'NOT approved: do not publish.' : 'All run checks passed. Still read the samples and warnings yourself.'}`);
   if (!DO_AUDIO) say('  (audio not checked in this run: use --audio)');
   if (!DO_FULL) say('  (full-surah audio not checked in this run: use --fullsurah)');
+  if (!DO_PDF) say('  (PDFs not checked in this run: use --pdf)');
+  if (!DO_IMAGES) say('  (ayah images not checked in this run: use --images)');
   fs.writeFileSync(REPORT_FILE, lines.join('\n') + '\n');
   console.log(`\nReport saved to ${REPORT_FILE}`);
   process.exit(failures ? 1 : 0);

@@ -14,50 +14,55 @@ A Discord bot for small Arabic-speaking communities in Algeria. One Node.js proc
 
 **Hadith grading (idea, undecided, parked behind Nakhtim).** Only matters if the pool expands beyond Bukhari/Muslim (everything there is sahih by collection). If pursued: compute grades once at build time into a small `data/grades.json` (join pool with a grade source by collection + number, verify text near-identical, else ungraded/drop), show the grader's name, send only sahih/hasan. Open question for the owner: which extra collections and which primary grader. Sources researched but untested: hadithapi.com, fawazahmed0/hadith-api (grades with grader names for Abu Dawud/Tirmidhi/Ibn Majah/Nasa'i), Dorar.net (best, API token requested, no answer).
 
-**Nakhtim (Quran reader): IN PROGRESS, current focus.** See section 4.
+**Nakhtim (Quran reader): V2 updates BUILT, offline-verified; awaiting private Discord test.** See section 4.
 
 ## 3. Code layout
-- `bot.js`: entry. Creates the client, loads the `features` array, routes interactions/messages, startup.
+- `bot.js`: entry. Creates the client, loads the `features` array (`adhan`, `ahadith`, `nakhtim`), routes interactions/messages, startup.
 - `adhan.js`, `adhan-embeds.js`: adhan feature. Its `onInteraction` handles only `times:refresh` and slash commands and returns false otherwise.
 - `ahadith.js`, `ahadith-embeds.js`: daily hadith (also holds the dormant sharh button). This is the **reference implementation of an optional per-server feature**; copy its patterns for Nakhtim.
-- `lib/`: `algiers-time.js`, `config-store.js` (serverconfig.json), `log.js`, `split-text.js`, `state-store.js` (atomic JSON in `data/`), `daily-scheduler.js` (30 s tick), `hadith-pool.js`, `sharh-store.js`.
-- `scripts/`: `build-hadith-pool.js`, `build-sharh.js` and `probe-*.js` (sharh helpers, on hold), `verify-nakhtim-data.js` (new, see 4).
-- `serverconfig.json`: per guild `textChannelId`, `ignoredChannels`, `ahadith {enabled, channelId, time}`. `data/ahadith-state.json` is runtime state. `.env` holds `TOKEN_1`: never read it.
+- `nakhtim.js`, `nakhtim-embeds.js`: Nakhtim DM Quran reader (`/nakhtim setup|off|status`, panel subscribe/unsubscribe, reciter select, surah intro cards, parchment ayah PNGs + text fallback, sticky bottom panel, temp tafsir/audio auto-cleanup, grouped tafsir, per-ayah/full-surah audio, Medina Mushaf surah & Ajza' PDFs with Juz collapse, Khatmah Full Quran PDF link).
+- `lib/`: `algiers-time.js`, `config-store.js` (serverconfig.json), `log.js`, `split-text.js`, `state-store.js` (atomic JSON in `data/`), `daily-scheduler.js` (30 s tick), `hadith-pool.js`, `quran-store.js`, `ayah-image.js`, `sharh-store.js`.
+- `scripts/`: `build-hadith-pool.js`, `build-sharh.js` and `probe-*.js` (sharh/hadith helpers, on hold), `verify-nakhtim-data.js`, `test-nakhtim.js`.
+- `serverconfig.json`: per guild `textChannelId`, `ignoredChannels`, `ahadith {enabled, channelId, time}`, `nakhtim {enabled, channelId, panelMessageId}`. `data/ahadith-state.json` and `data/nakhtim-state.json` are runtime state. `.env` holds `TOKEN_1`: never read it.
 - Root also holds the 5 prayer mp3 files, `voicetest.js`, `README.md`, `build-report.txt` (housekeeping: delete).
 
 ## 4. Nakhtim: design (agreed with the owner)
 **Idea.** A Quran ayah-by-ayah reader. Server owners optionally add a locked "subscribers" channel (dormant in servers that do not set it up, like ahadith). Each subscriber then reads ayah by ayah in their **DMs**.
 
-**Server side.** `/nakhtim setup channel` (Manage Server) posts a locked panel with buttons "اشترك" and "إيقاف". Per-guild settings go in `serverconfig.json` under `nakhtim` (shallow-merge caveat applies).
+**Server side.** `/nakhtim setup channel` (Manage Server) posts a locked panel with buttons "اشترك" and "إيقاف"; `/nakhtim off` and `/nakhtim status` manage it. Per-guild settings go in `serverconfig.json` under `nakhtim` (shallow-merge caveat applies).
 
-**Subscribing.** The user presses اشترك, picks a reciter from a select menu, and the bot DMs ayah 1:1. If DMs are closed Discord rejects the message: reply ephemerally asking them to open DMs and retry. Bots cannot bypass this.
+**Subscribing.** The user presses اشترك, picks a reciter from a select menu (no `default: true` option so returning users can re-select their previous reciter after stopping; previous/current reciter shown in the prompt text), and the bot DMs Surah 1's intro card (or resumes saved position for returning users, cleaning up any stale panel/temp messages). If DMs are closed (`50007`), Discord rejects the message: reply ephemerally asking them to open DMs and retry. Bots cannot bypass this. Users can change reciter anytime via the `🎙️ تغيير القارئ` button on their DM panel.
 
-**DM panel.** Arabic embed: the ayah (Uthmani Hafs with diacritics), surah name and number, ayah number. Four Arabic buttons: السابقة ◀، التالية ▶، 📖 التفسير، 🔊 استماع. Default (decided by Claude, owner did not object): next/previous **edit the same message**; tafsir and audio arrive as separate messages. Buttons are handled by the normal interaction router so they survive restarts (custom IDs carry everything needed, state is stored).
+**DM panel.**
+- **Surah intro card** (shown when entering a surah via Subscribe or Next from the previous surah): medium-large surah heading (`## 📖 <name>`), surah number & ayah count, and the `تسمية السورة / من مقاصد السورة` intro block (`### ` headings for desktop readability) from `tafsir-muyassar.json`. Buttons: `السابقة ◀` (disabled on Surah 1, else jumps to last ayah of previous surah), `التالية ▶` (starts ayah `s:1`), `🎙️ تغيير القارئ`. No Tafsir or Audio buttons here.
+- **Ayah card:** Arabic embed displaying the ayah as a trimmed, centered Medina Mushaf parchment calligraphy PNG (`#fbf6ea` background, `#1a1a1a` ink via `lib/ayah-image.js`, readable in both Discord Dark and Light mode; falls back to verified `quran-uthmani` text if the CDN fetch fails). `بِسْمِ ٱللَّهِ...` is shown (`### `) on `s:1` for surahs other than 1 and 9 (`1:1` is already Bismillah in the image; `9:1` has none). Buttons: Row 1 `السابقة ◀`، `التالية ▶`، `📖 التفسير`، `🔊 استماع`; Row 2 `🎙️ تغيير القارئ`.
+- **Sticky bottom panel & temp cleanup:** Next/Prev edit the panel in place when no new messages were sent below; whenever tafsir, per-ayah audio, surah rewards, Juz PDF, or Khatmah celebration is posted, the bot reposts the reading panel at the very bottom (`repostPanelAtBottom`) and deletes the older panel. Navigating (`التالية ▶`, `السابقة ◀`, Start, PrevIntro) automatically deletes the previous ayah's temporary tafsir/audio messages (`tempMsgIds`) while keeping permanent audio/PDF/Khatmah messages. Buttons carry coordinates in custom IDs so they survive restarts.
 
-**Progress.** Stored per user (not per server) in `data/` via `state-store.js`. New users start at 1:1. After 114:6 the next ayah wraps to 1:1.
+**Progress.** Stored per user (not per server) in `data/nakhtim-state.json` via `state-store.js` (`surah`, `ayah`, `mode`, `reciter`, `sentSurahs`, `sentAjza`, `panelMsgId`, `tempMsgIds`, `surahPdfMsgs`, `khatmahCount`). New users start at Surah 1 intro -> `1:1`. After `114:6`, Next keeps Surah 114 PDF, sends Juz 30 PDF (collapsing Surahs 78..113), sends the Khatmah celebration message + Full Medina Mushaf PDF link, resets `sentSurahs`/`sentAjza`/`surahPdfMsgs`, and wraps to Surah 1 intro.
 
-**Reciter.** Chosen at subscription, stored per user. For testing: Alafasy, Saad al-Ghamdi, Husary (the owner is collecting friends' requests to fill a list of 10 after testing).
+**Reciter.** Chosen at subscription and changeable anytime. Testing list (expandable to 10 after testing): `alafasy` (Alafasy), `ghamdi` (Saad al-Ghamdi), `husary` (Husary).
 
-**Audio.** Per-ayah mp3 from EveryAyah: `https://everyayah.com/data/<folder>/SSSAAA.mp3` (3-digit surah + 3-digit ayah). Folders to verify: `Alafasy_128kbps`, `Ghamadi_40kbps` (only 40 kbps, quality modest), `Husary_128kbps`. When a user reaches the **last ayah of a surah via "next"**, the bot sends the **full-surah** audio once, with no input (not re-sent when going back and forth). Full surahs are not on EveryAyah: candidate source mp3quran.net (API `https://www.mp3quran.net/api/v3/reciters?language=ar`), must be the same reciter. Discord upload limit is assumed ~10 MB (unconfirmed): attach if it fits, otherwise send a link.
+**Audio & Medina Mushaf PDFs.**
+- Per-ayah mp3 from EveryAyah: `Alafasy_128kbps`, `Ghamadi_40kbps`, `Husary_128kbps` (all 6,236 x 3 verified).
+- Ayah calligraphy PNGs from `cdn.islamic.network/quran/images/high-resolution/<s>_<a>.png` (all 6,236 verified with valid PNG signature & IHDR dimensions; largest raw `2_282` = 118 KB; recolored & LRU-cached in `lib/ayah-image.js`).
+- When a user completes a surah (`sentSurahs` 1x guard, not re-sent on revisit):
+  1. **Full-surah audio** from mp3quran.net (`حفص عن عاصم - مرتل` `r1` for all 3 reciters, owner-confirmed voice match): attached when `<= 19.5 MiB` (official Discord default limit is **20 MiB**, enforced with a streaming byte cap), otherwise sent as a clickable MP3 link (Alafasy 88/114, Ghamdi 102/114, Husary 74/114 fit under 20 MiB).
+  2. **Full-surah Medina Mushaf PDF** from `pdfquran.com/standard1` (`data/surah-pdfs.json`, 114/114 verified `%PDF-`; includes Surah name, Juz/Hizb, and page headers on every page; Surah 2 Al-Baqarah = 12.06 MiB <= 20 MiB so all 114 fit; degrades silently if missing).
+- When a user completes a **Juz** (`sentAjza` 1x guard, `data/juz-pdfs.json` from `archive.org/01_20200522_20200522`): deletes wholly-contained individual surah PDFs from `surahPdfMsgs` (except Surah 114 on Khatmah) and sends the Juz Medina Mushaf PDF (29/30 fit under 20 MiB; Juz 1 is link-only).
+- On **Khatmah** (`114:6` -> Next): links the Full Medina Mushaf PDF (`archive.org/download/MushafMadinaHafsGreen1441/MushafMadinaHafsGreen1441.pdf`, 62.00 MiB, verified `%PDF-`).
 
-**Tafsir.** Al-Muyassar, cached locally. Data facts found on real data: (a) Muyassar comments on **groups of ayahs** (625 groups, 1,196 repeated entries, e.g. 2:45-46 share one text), so the tafsir button should say which ayahs it covers ("تفسير الآيات 45-46"); (b) the entry of the first ayah of every surah has an introduction block ("تسمية السورة / من مقاصد السورة" then the tafsir) which the verification script splits off and stores separately (decision pending: show it or not); (c) longest entry ~1,444 chars, so no splitting needed under the 4096 embed limit.
+**Tafsir.** Al-Muyassar cached in `data/tafsir-muyassar.json`. Covers **groups of ayahs** (1,196 repeated entries; e.g., 2:45-46 show title `تفسير الآيات 45–46` every time pressed), intro blocks split off from both ayah 1 (114) and repeated opening-group ayahs (135), longest entry 1,444 chars (< 4,096 embed limit). Stray `[التفسير]` in `5:60` left untouched by owner decision.
 
-**Quran text.** Source A: fawazahmed0 `ara-quranuthmanihaf`. Known defect: in ~1,735 ayahs a stray space sits between a diacritic and a lone final alef/ya (e.g. "رَشَدࣰ ا" instead of "رَشَدࣰا", 18:10). The script removes only that space and counts it (the one text edit). **Needs the owner's explicit OK.** Another edition (`ara-quransimple`) has the Bismillah glued to the first ayah of every surah: do not use it.
+**Quran text.** Primary source (used for fallback & metadata): `alquran.cloud` `quran-uthmani` (Tanzil Uthmani Hafs with dagger alefs, maddah, and waqf marks; 112 prepended surah Bismillahs stripped cleanly, 0 mid-text edits; also provides continuous 30 Ajza' boundaries), cross-checked against `fawazahmed0` `ara-quranuthmanihaf` (0 hard diffs).
 
 **Later (v2, not in V1).** 24-hour auto-advance with a stop option; jump-to-surah (needs a paged select menu, 114 > 25 options).
 
 **V1 quality bar.** The owner will not publish to any server until everything is tested carefully; V1 must ship with full tafsir and audio. Mistakes are not acceptable.
 
-### Verification script (`scripts/verify-nakhtim-data.js`, written, not yet run by the owner)
-- `node scripts\verify-nakhtim-data.js` checks text + tafsir. `--audio` checks all 6,236 ayah files x 3 reciters (resumable, cache in `data/nakhtim-audio-check.json`). `--fullsurah` checks mp3quran.net. `--all` does everything. It writes `nakhtim-report.txt`; only if every text/tafsir check passes does it write `data/quran.json` (`{surahs:[{n,name,ayahs[]}]}`) and `data/tafsir-muyassar.json` (`{source,intro:{n:text},tafsir:[[...]]}`); on failure it deletes older copies.
-- Tested on real GitHub data for source A and the tafsir. Tested **only against a mock server** for: the alquran.cloud cross-check (second Quran copy and second Muyassar copy; response shape assumed), everyayah.com folder names, the mp3quran.net API shape, the 10 MB limit. Failure modes tested with the mock: corrupted ayah, shifted tafsir, missing audio file, incomplete recording.
-- The built-in ayah-count table (6,236) was validated against the fawazahmed0 metadata.
-- The owner must still: compare the 8 printed samples with a printed mushaf and tafsir book, listen to a few full-surah files to confirm the same reciter as the per-ayah ones, and test in real Discord privately before any server gets the panel.
-
-### Nakhtim build order
-1. Run the verification (text/tafsir, then `--audio`, then `--fullsurah`), fix script/source problems, get owner decisions (repair rule, intro display, grouped-tafsir wording, reciter folders, full-surah source, link-or-file).
-2. Plan, then build `nakhtim.js` (+ `nakhtim-embeds.js`, `lib/quran-store.js`) and one line in `bot.js`.
-3. Owner tests privately (own test server, DMs), then a small real server, only then publish.
+### Verification script (`scripts/verify-nakhtim-data.js`, verified on live data)
+- `node scripts\verify-nakhtim-data.js` (text + tafsir + 30 Ajza' boundaries), `--audio` (EveryAyah 6,236 x 3), `--fullsurah` (mp3quran.net), `--pdf` (`pdfquran.com/standard1` 114 Medina Mushaf PDFs + Archive.org 30 Ajza' & Full Mushaf), `--images` (6,236 ayah PNG headers + 8 full end-to-end `IEND` checks), `--all` (everything).
+- Writes `nakhtim-report.txt` and, on passing checks, `data/quran.json`, `data/tafsir-muyassar.json`, `data/surah-pdfs.json`, `data/juz-pdfs.json`, `data/nakhtim-audio-check.json`, and `data/nakhtim-image-check.json`.
+- Offline code + data + lifecycle test suite: `node scripts\test-nakhtim.js` (all 5 stages pass without connecting to Discord).
 
 ## 5. Decisions (do not relitigate without a reason)
 - One process, modular features. A second text-only process reusing feature files is possible later (text needs no UDP).
@@ -82,11 +87,13 @@ The owner wants 24/7 uptime and has had trouble finding a free host that allows 
 The phone is the recommended first step; the network can be a later backup.
 
 ## 8. Next steps
-1. Nakhtim phase 1: data verification (section 4).
-2. Nakhtim build and staged testing.
-3. Housekeeping: delete `build-report.txt`; rotate the bot token if it was ever shared (a `.env` was uploaded in an earlier chat); `CONVENTIONS.md` is git-ignored and was for Aider (its rules are now in `AGENTS.md`); probe scripts can go only if the owner says sharh is dropped for good.
-4. Port adhan scheduling to the tick-based scheduler.
-5. Hosting (section 7). Hadith grading (section 2).
+1. Owner tests Nakhtim V2 privately in Discord (re-selecting same reciter after `إيقاف`, intro headings on desktop & mobile, parchment ayah PNGs in Dark & Light mode, sticky bottom panel + temp tafsir/audio cleanup, Medina Mushaf `standard1` surah PDFs, Juz collapse & Khatmah Full Quran PDF link, audio playback, restart persistence), then expands reciters from 3 to 10 when ready.
+2. Housekeeping: delete `build-report.txt`; rotate the bot token if it was ever shared (a `.env` was uploaded in an earlier chat); `CONVENTIONS.md` is git-ignored and was for Aider (its rules are now in `AGENTS.md`); probe scripts can go only if the owner says sharh is dropped for good.
+3. Port adhan scheduling to the tick-based scheduler.
+4. Hosting (section 7). Hadith grading (section 2). Nakhtim V2 later items (24h auto-advance, jump-to-surah).
 
 ## 9. Status (agent: update this at the end of each session)
-- 21 Nov 2026: Nakhtim design agreed; `scripts/verify-nakhtim-data.js` written, not yet run by the owner. No Nakhtim bot code exists yet. Adhan and the 11:00 hadith post confirmed working by the owner.
+- 21 Nov 2026: Nakhtim V2 updates verified and offline-tested with 0 failures:
+  - Switched Surah PDFs to Medina Mushaf `pdfquran.com/standard1` (114/114 `%PDF-`, Al-Baqarah 12.06 MiB <= 20 MiB) + 30 Archive.org Ajza' PDFs (29/30 <= 20 MiB, Juz 1 link-only) + Full Medina Mushaf PDF (`MushafMadinaHafsGreen1441.pdf`, 62.00 MiB) via `--pdf` (`data/surah-pdfs.json`, `data/juz-pdfs.json`).
+  - Verified all 6,236 high-res ayah PNG headers + 8 full end-to-end `IEND` downloads via `--images` (`data/nakhtim-image-check.json`, largest raw `2_282` = 118 KB); built `lib/ayah-image.js` parchment (`#fbf6ea`/`#1a1a1a`) cropper/LRU cache.
+  - Updated `nakhtim-embeds.js`, `lib/quran-store.js`, `nakhtim.js`, and `scripts/test-nakhtim.js` (no `default: true` reciter lock, `### ` intro headings, sticky bottom panel + temp message auto-cleanup, Juz surah PDF collapse except Surah 114, Khatmah Full Mushaf link, reciter change re-sending panel payload with cached PNG). All 7 JS files passed `node --check` and all 5 stages in `node scripts\test-nakhtim.js` passed. Pending owner's live private Discord V2 test.

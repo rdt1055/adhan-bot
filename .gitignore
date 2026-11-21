@@ -3,3 +3,8 @@
 node_modules/
 CONVENTIONS.md
 data/ahadith-state.json
+data/nakhtim-state.json
+data/nakhtim-audio-check.json
+data/nakhtim-image-check.json
+nakhtim-report.txt
+serverconfig.json
