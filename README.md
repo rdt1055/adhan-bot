@@ -26,3 +26,6 @@ Supports both **Slash Commands** (`/`) and **Prefix Commands** (`!`).
 1. Install dependencies:
    ```bash
    npm install
+
+## 📖 Daily hadith + sharh (optional)
+`/hadith setup channel [time]` posts one sahih hadith a day (Bukhari / Muslim) with its ruling. If `data/sharh.jsonl` exists, a 📚 button under the hadith shows the sharh (Fath al-Bari / Sharh al-Nawawi) as a private reply. Build the sharh file once on a PC with: `node scripts/build-sharh.js "C:\path\jawami.db"` (source: Jawami' al-Kalim, Offok / Islamweb).

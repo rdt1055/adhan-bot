@@ -8,9 +8,9 @@ const { formatAlgiersNow } = require('./lib/algiers-time');
    prepare(), onReady(client), onInteraction(interaction), onMessage(message).
    onInteraction / onMessage return true when they handled the event. */
 const features = [
-  require('./adhan')
-  // require('./nakhtim'),
-  // require('./ahadith')
+  require('./adhan'),
+  require('./ahadith')
+  // require('./nakhtim')
 ];
 
 /* -------- CREATE BOT -------- */

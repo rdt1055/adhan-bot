@@ -1,0 +1,12 @@
+Jawami sharh rows: 14410 | with a hadith text: 10528 | without (skipped): 3882
+
+== text matching ==
+{"poolTotal":12830,"noCandidate":0,"tooLowScore":2908,"ambiguous":399,"matched":9224,"lostToBetterPair":299}
+best-score histogram (0.0-0.1 ... 1.0): 0 38 394 563 568 398 292 382 636 2757 6802
+
+== alignment audit ==
+{"checked":8143,"ok":2020,"neighbourBetter":3667,"unverifiable":2456}
+which Jawami number the sharh text fits best (0 = same number): {"0":4476,"1":784,"2":660,"-1":898,"-2":1325}
+
+ABORTED: the sharh numbering does not line up with the hadith numbering in enough cases.
+Nothing was written. Send this whole output to Claude so the mapping can be fixed.
